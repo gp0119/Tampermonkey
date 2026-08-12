@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Swagger 接口信息复制
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.0.7
+// @version      1.0.8
 // @description  在 Swagger 每个接口后添加按钮，复制接口名称、请求参数和响应字段类型
 // @match        *://*.chaomeifan.com/api/*/swagger-ui.html*
 // @run-at       document-idle
@@ -400,7 +400,7 @@
   function scheduleButtonScan() {
     if (scanScheduled) return
     scanScheduled = true
-    queueMicrotask(() => {
+    requestAnimationFrame(() => {
       scanScheduled = false
       addCopyButtons()
     })
