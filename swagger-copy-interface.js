@@ -1,15 +1,13 @@
 // ==UserScript==
 // @name         Swagger 接口信息复制
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.0.6
+// @version      1.0.7
 // @description  在 Swagger 每个接口后添加按钮，复制接口名称、请求参数和响应字段类型
 // @match        *://*.chaomeifan.com/api/*/swagger-ui.html*
 // @run-at       document-idle
 // @grant        GM_addStyle
 // @grant        GM_setClipboard
 // ==/UserScript==
-
-/* global GM_addStyle, GM_setClipboard */
 
 ;(function () {
   'use strict'
@@ -21,11 +19,9 @@
   const BUTTON_ICONS = {
     copy: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path></svg>',
     url: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15"></path></svg>',
-    loading:
-      '<svg class="is-spinning" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path></svg>',
+    loading: '<svg class="is-spinning" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path></svg>',
     success: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg>',
-    error:
-      '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m9 9 6 6m0-6-6 6"></path></svg>',
+    error: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m9 9 6 6m0-6-6 6"></path></svg>',
   }
   let scanScheduled = false
 
@@ -186,12 +182,7 @@
     const requiredFields = new Set(Array.isArray(schema.required) ? schema.required : [])
     Object.entries(schema.properties || {}).forEach(([name, fieldSchema]) => {
       const indentation = '  '.repeat(depth)
-      lines.push(
-        `${indentation}- ${name}：${describeType(fieldSchema)}${describeRules(
-          fieldSchema,
-          requiredFields.has(name),
-        )}`,
-      )
+      lines.push(`${indentation}- ${name}：${describeType(fieldSchema)}${describeRules(fieldSchema, requiredFields.has(name))}`)
       appendSchemaFields(fieldSchema, spec, lines, depth + 1, seenRefs)
     })
   }
@@ -227,9 +218,7 @@
     if (consumes && consumes.length) lines.push(`请求类型：${consumes.join('、')}`)
 
     lines.push('', '请求参数：')
-    const parameters = [...(pathItem.parameters || []), ...(operation.parameters || [])].map((item) =>
-      resolveParameter(item, spec),
-    )
+    const parameters = [...(pathItem.parameters || []), ...(operation.parameters || [])].map((item) => resolveParameter(item, spec))
 
     if (!parameters.length) {
       lines.push('- 无')
@@ -244,14 +233,14 @@
         lines.push(
           `- ${parameter.name || '未命名参数'} [${parameter.in || 'unknown'}]：${describeType(schema)}${
             rules.length ? `（${rules.join('；')}）` : ''
-          }`,
+          }`
         )
         appendSchemaFields(schema, spec, lines, 1, new Set())
       })
     }
 
     lines.push('', '响应：')
-    const responses = Object.entries(operation.responses || {}).filter(([status]) => /^2\d\d$/.test(status))
+    const responses = Object.entries(operation.responses || {}).filter(([status]) => status === '200')
     if (!responses.length) {
       lines.push('- 未声明')
     } else {
@@ -259,11 +248,7 @@
         const response = resolveResponse(originalResponse, spec)
         const responseDescription = cleanText(response.description)
         const schema = response.schema
-        lines.push(
-          `- ${status}${responseDescription ? ` ${responseDescription}` : ''}${
-            schema ? `：${describeType(schema)}` : ''
-          }`,
-        )
+        lines.push(`- ${status}${responseDescription ? ` ${responseDescription}` : ''}${schema ? `：${describeType(schema)}` : ''}`)
         appendSchemaFields(schema, spec, lines, 1, new Set())
       })
     }
