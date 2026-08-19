@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Swagger 接口 URL 搜索
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.1.5
+// @version      1.1.6
 // @description  按 URL 跨 Select a spec 分组搜索 Swagger 接口，并跳转到对应分组
 // @match        *://*.chaomeifan.com/api/*/swagger-ui.html*
 // @run-at       document-idle
@@ -217,8 +217,25 @@
       .trim()
   }
 
+  function swaggerBaseUrl() {
+    return location.href.replace(/[?#].*$/, '').replace(/[^/]*swagger-ui\.html$/i, '')
+  }
+
   function resolveUrl(url) {
-    return new URL(url, location.href).href
+    const raw = String(url || '').trim()
+    const base = swaggerBaseUrl()
+    if (!raw) return base
+
+    if (/^https?:\/\//i.test(raw)) {
+      const parsed = new URL(raw)
+      const basePath = new URL(base).pathname.replace(/\/$/, '')
+      if (parsed.origin === location.origin && /^\/v[23]\/api-docs$/i.test(parsed.pathname) && basePath) {
+        return `${parsed.origin}${basePath}${parsed.pathname}${parsed.search}`
+      }
+      return parsed.href
+    }
+
+    return new URL(raw.replace(/^\//, ''), base).href
   }
 
   function urlsMatch(left, right) {
@@ -254,9 +271,9 @@
       if (!Array.isArray(urls) || !urls.length) return []
       return urls
         .map((item) => {
-          const url = (item.url || item).trim?.() || item.url
+          const url = typeof item === 'string' ? item : item.url || item.location
           if (!url) return null
-          return { name: cleanText(item.name) || url, url }
+          return { name: cleanText(item.name) || url, url: String(url).trim() }
         })
         .filter(Boolean)
     } catch (error) {
@@ -282,7 +299,7 @@
           .map((item) => {
             const url = item.url || item.location
             if (!url) return null
-            return { name: cleanText(item.name) || url, url: new URL(url, resourceUrl).href }
+            return { name: cleanText(item.name) || url, url: resolveUrl(url) }
           })
           .filter(Boolean)
       } catch (error) {
@@ -358,14 +375,31 @@
     return items
   }
 
+  function specFromUi() {
+    try {
+      const json = window.ui?.specSelectors?.specJson?.()
+      if (!json) return null
+      return typeof json.toJS === 'function' ? json.toJS() : json
+    } catch (error) {
+      return null
+    }
+  }
+
   function fetchSpec(url) {
     const resolved = resolveUrl(url)
     if (specCache.has(resolved)) return specCache.get(resolved)
 
     const request = fetch(resolved, { credentials: 'include' })
       .then((response) => {
-        if (!response.ok) throw new Error(`Swagger JSON 加载失败：HTTP ${response.status}`)
-        return response.json()
+        if (response.ok) return response.json()
+
+        const currentUrl = window.ui?.specSelectors?.url?.() || getCurrentSpecUrl()
+        if (urlsMatch(resolved, currentUrl)) {
+          const spec = specFromUi()
+          if (spec?.paths) return spec
+        }
+
+        throw new Error(`Swagger JSON 加载失败：HTTP ${response.status}`)
       })
       .catch((error) => {
         specCache.delete(resolved)
