@@ -1,6 +1,9 @@
 // ==UserScript==
 // @name         谷歌翻译绕过代码块(适配github,mathworks等)
+// @version      1.0.0
 // @description  让谷歌翻译插件翻译网页的时候，绕过代码块和一些无需翻译的元素
+// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/no-tanslate-code.js
+// @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/no-tanslate-code.js
 // @match        http*://*
 // @license      MIT
 // @grant        none

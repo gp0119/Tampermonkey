@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         禅道一键完成
 // @namespace    http://tampermonkey.net/
-// @version      2025-04-02
+// @version      2025-04-03
 // @description  禅道一键完成
+// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-batch-complete.js
+// @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-batch-complete.js
 // @author       You
 // @match        http://zentao.chaomeifan.com/zentao/task-batchEdit-0-id_desc.html
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=chaomeifan.com

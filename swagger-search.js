@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         Swagger 接口 URL 搜索
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.1.6
+// @version      1.1.7
 // @description  按 URL 跨 Select a spec 分组搜索 Swagger 接口，并跳转到对应分组
+// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-search.js
+// @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-search.js
 // @match        *://*.chaomeifan.com/api/*/swagger-ui.html*
 // @run-at       document-idle
 // @grant        GM_addStyle

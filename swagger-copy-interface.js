@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         Swagger 接口信息复制
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.0.8
+// @version      1.0.9
 // @description  在 Swagger 每个接口后添加按钮，复制接口名称、请求参数和响应字段类型
+// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.js
+// @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.js
 // @match        *://*.chaomeifan.com/api/*/swagger-ui.html*
 // @run-at       document-idle
 // @grant        GM_addStyle

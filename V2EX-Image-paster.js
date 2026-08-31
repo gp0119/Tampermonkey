@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         V2EX Image paster
 // @namespace    v2ex-image-paster
-// @version      1.0
+// @version      1.0.1
 // @description  Automatically uploads pasted images to Imgur on V2EX input boxes
+// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/V2EX-Image-paster.js
+// @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/V2EX-Image-paster.js
 // @match        https://www.v2ex.com/*
 // @match        https://*
 // @grant        GM_xmlhttpRequest
