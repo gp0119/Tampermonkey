@@ -1,10 +1,8 @@
 // ==UserScript==
 // @name         Vue 页面元素打开 Cursor
 // @namespace    https://github.com/gp/Tampermonkey
-// @version      1.3.6
+// @version      1.3.7
 // @description  选取 Vue 页面组件，通过 Alfred 在 Cursor 中打开对应 .vue 文件
-// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/vue-open-in-vscode.js
-// @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/vue-open-in-vscode.js
 // @match        *://z.gc.chaomeifan.com/*
 // @match        *://xt.ty.chaomeifan.com/*
 // @match        *://pg.chaomeifan.com/*
