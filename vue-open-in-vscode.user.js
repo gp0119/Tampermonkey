@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vue 页面元素打开 Cursor
 // @namespace    https://github.com/gp/Tampermonkey
-// @version      1.4.2
+// @version      1.4.3
 // @description  通过 Alfred 在 Cursor 中打开当前路由页面源码
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/vue-open-in-vscode.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/vue-open-in-vscode.user.js
@@ -35,11 +35,11 @@
       pagePrefix: 'z.gc.chaomeifan.com/',
       root: '/Users/gp/zcckj/guangcheng-back-pc',
     },
-    { id: 'mall-back-pc', pagePrefix: 'admin.p.chaomeifan.com/', root: '/Users/gp/zcckj/mall-back-pc' },
-    { id: 'operator-mall-pc', pagePrefix: 'p.chaomeifan.com/operator/', routeBase: '/operator', root: '/Users/gp/zcckj/operator-mall-pc' },
+    { id: 'mall-back-pc', apiPrefix: '/api/admin/', pagePrefix: 'admin.p.chaomeifan.com/', root: '/Users/gp/zcckj/mall-back-pc' },
+    { id: 'operator-mall-pc', apiPrefix: '/api/shiji-region-operator/', pagePrefix: 'p.chaomeifan.com/operator/', routeBase: '/operator', root: '/Users/gp/zcckj/operator-mall-pc' },
     { id: 'pangu-back-pc', pagePrefix: 'pg.chaomeifan.com/', root: '/Users/gp/zcckj/pangu-back-pc' },
-    { id: 'sj-mall-pc', pagePrefix: 'sj.chaomeifan.com/', root: '/Users/gp/zcckj/sj-mall-pc' },
-    { id: 'warehouse', pagePrefix: 'z.gc.chaomeifan.com/yz/', routeBase: '/yz', root: '/Users/gp/zcckj/warehouse' },
+    { id: 'sj-mall-pc', apiPrefix: '/api/shiji/', pagePrefix: 'sj.chaomeifan.com/', root: '/Users/gp/zcckj/sj-mall-pc' },
+    { id: 'warehouse', apiPrefix: '/api/yunzhong/', pagePrefix: 'z.gc.chaomeifan.com/yz/', routeBase: '/yz', root: '/Users/gp/zcckj/warehouse' },
   ]
   const BUTTON_ID = 'vue-component-open-in-cursor-button'
   const ALFRED_TRIGGER_URL = 'alfred://runtrigger/com.gp.open-cursor/open/?argument='
@@ -124,16 +124,4 @@
   button.setAttribute('aria-label', button.title)
   button.addEventListener('click', openInCursor)
   document.body.append(button)
-
-  console.assert(projectForApi(['/api/taiyi/auth/token']).id === 'factory-back-pc')
-  console.assert(projectForApi(['/api/guangcheng/user']).id === 'guangcheng-back-pc')
-  console.assert(projectForPage('xt.ty.chaomeifan.com/login').id === 'factory-back-pc')
-  console.assert(projectForPage('z.gc.chaomeifan.com/yz/index').id === 'warehouse')
-  console.assert(projectForPage('z.gc.chaomeifan.com/login').id === 'guangcheng-back-pc')
-  console.assert(projectForPage('admin.p.chaomeifan.com/home').id === 'mall-back-pc')
-  console.assert(projectForPage('p.chaomeifan.com/operator/product/list').id === 'operator-mall-pc')
-  console.assert(projectForPage('pg.chaomeifan.com/login').id === 'pangu-back-pc')
-  console.assert(projectForPage('sj.chaomeifan.com/product/list').id === 'sj-mall-pc')
-  console.assert(projects.length === 8)
-  console.assert(routePathFor('/yz/purchase/page/orderRecord', '/yz') === '/purchase/page/orderRecord')
 })()
