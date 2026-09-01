@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vue 页面元素打开 Cursor
 // @namespace    https://github.com/gp/Tampermonkey
-// @version      1.4.1
+// @version      1.4.2
 // @description  通过 Alfred 在 Cursor 中打开当前路由页面源码
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/vue-open-in-vscode.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/vue-open-in-vscode.user.js
@@ -9,7 +9,6 @@
 // @match        *://xt.ty.chaomeifan.com/*
 // @match        *://pg.chaomeifan.com/*
 // @match        *://admin.p.chaomeifan.com/*
-// @match        *://kt.chaomeifan.com/*
 // @match        https://sj.chaomeifan.com/*
 // @match        https://p.chaomeifan.com/operator/*
 // @match        http://localhost:*/*
