@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Swagger 接口信息复制
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.0.10
-// @description  在 Swagger 每个接口后添加按钮，复制接口名称、请求参数和响应字段类型
+// @version      1.1.0
+// @description  在 Swagger 接口和分组后添加按钮，复制接口名称、请求参数和响应字段类型
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.user.js
 // @match        *://*.chaomeifan.com/api/*/swagger-ui.html*
@@ -16,10 +16,13 @@
 
   const BUTTON_CLASS = 'swagger-copy-interface-button'
   const ACTIONS_CLASS = 'swagger-copy-interface-actions'
+  const GROUP_BUTTON_CLASS = 'swagger-copy-group-button'
   const MAX_SCHEMA_DEPTH = 8
+  const HTTP_METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch']
   const specCache = new Map()
   const BUTTON_ICONS = {
     copy: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path></svg>',
+    group: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h11M8 12h11M8 18h11"></path><path d="M4 6h.01M4 12h.01M4 18h.01"></path></svg>',
     url: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15"></path></svg>',
     loading: '<svg class="is-spinning" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path></svg>',
     success: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg>',
@@ -54,6 +57,10 @@
       align-items: center;
       gap: 8px;
       margin: 0 10px;
+    }
+
+    .${GROUP_BUTTON_CLASS} {
+      margin-left: 10px !important;
     }
 
     .${BUTTON_CLASS} svg {
@@ -156,10 +163,15 @@
     return rules.length ? `（${rules.join('；')}）` : ''
   }
 
-  function appendSchemaFields(schema, spec, lines, depth, seenRefs) {
+  function appendSchemaFields(schema, spec, lines, depth, seenRefs, referencedSchemas) {
     if (!schema || depth > MAX_SCHEMA_DEPTH) return
 
     if (schema.$ref) {
+      if (referencedSchemas) {
+        referencedSchemas.set(schema.$ref, resolveRef(schema.$ref, spec))
+        return
+      }
+
       const name = refName(schema.$ref)
       if (seenRefs.has(name)) return
 
@@ -173,19 +185,19 @@
     }
 
     if (schema.type === 'array') {
-      appendSchemaFields(schema.items, spec, lines, depth, seenRefs)
+      appendSchemaFields(schema.items, spec, lines, depth, seenRefs, referencedSchemas)
       return
     }
 
     if (schema.allOf) {
-      schema.allOf.forEach((item) => appendSchemaFields(item, spec, lines, depth, seenRefs))
+      schema.allOf.forEach((item) => appendSchemaFields(item, spec, lines, depth, seenRefs, referencedSchemas))
     }
 
     const requiredFields = new Set(Array.isArray(schema.required) ? schema.required : [])
     Object.entries(schema.properties || {}).forEach(([name, fieldSchema]) => {
       const indentation = '  '.repeat(depth)
       lines.push(`${indentation}- ${name}：${describeType(fieldSchema)}${describeRules(fieldSchema, requiredFields.has(name))}`)
-      appendSchemaFields(fieldSchema, spec, lines, depth + 1, seenRefs)
+      appendSchemaFields(fieldSchema, spec, lines, depth + 1, seenRefs, referencedSchemas)
     })
   }
 
@@ -204,12 +216,13 @@
     return `${scheme}://${host}${basePath}${path}`
   }
 
-  function formatOperation(spec, path, method, operation, pathItem) {
+  function formatOperation(spec, path, method, operation, pathItem, options = {}) {
     const lines = []
     const title = cleanText(operation.summary || operation.description) || '未命名接口'
+    const { includeGroup = true, referencedSchemas } = options
 
     lines.push(`接口名称：${title}`)
-    if (operation.tags && operation.tags.length) lines.push(`所属分组：${operation.tags.join('、')}`)
+    if (includeGroup && operation.tags && operation.tags.length) lines.push(`所属分组：${operation.tags.join('、')}`)
     lines.push(`请求方法：${method.toUpperCase()}`)
     lines.push(`接口路径：${path}`)
     lines.push(`完整地址：${buildFullUrl(spec, path)}`)
@@ -237,7 +250,7 @@
             rules.length ? `（${rules.join('；')}）` : ''
           }`
         )
-        appendSchemaFields(schema, spec, lines, 1, new Set())
+        appendSchemaFields(schema, spec, lines, 1, new Set(), referencedSchemas)
       })
     }
 
@@ -251,10 +264,51 @@
         const responseDescription = cleanText(response.description)
         const schema = response.schema
         lines.push(`- ${status}${responseDescription ? ` ${responseDescription}` : ''}${schema ? `：${describeType(schema)}` : ''}`)
-        appendSchemaFields(schema, spec, lines, 1, new Set())
+        appendSchemaFields(schema, spec, lines, 1, new Set(), referencedSchemas)
       })
     }
 
+    return lines.join('\n')
+  }
+
+  function getGroupName(group) {
+    return cleanText(group.querySelector('a')?.textContent)
+  }
+
+  function getGroupOperations(spec, groupName) {
+    const operations = []
+
+    Object.entries(spec.paths || {}).forEach(([path, pathItem]) => {
+      HTTP_METHODS.forEach((method) => {
+        const operation = pathItem[method]
+        if (!operation) return
+
+        const tags = operation.tags?.length ? operation.tags : ['default']
+        if (tags.includes(groupName)) operations.push({ path, method, operation, pathItem })
+      })
+    })
+
+    return operations
+  }
+
+  function formatGroup(spec, groupName, operations) {
+    const referencedSchemas = new Map()
+    const lines = [`接口分组：${groupName}`, `接口数量：${operations.length}`]
+
+    operations.forEach(({ path, method, operation, pathItem }, index) => {
+      lines.push('', `===== 接口 ${index + 1} =====`)
+      lines.push(formatOperation(spec, path, method, operation, pathItem, { includeGroup: false, referencedSchemas }))
+    })
+
+    const schemaLines = []
+    referencedSchemas.forEach((definition, ref) => {
+      if (!definition) return
+
+      schemaLines.push('', `${refName(ref)}：${describeType(definition)}`)
+      appendSchemaFields(definition, spec, schemaLines, 1, new Set([refName(ref)]), referencedSchemas)
+    })
+
+    if (schemaLines.length) lines.push('', '===== 共用数据结构 =====', ...schemaLines)
     return lines.join('\n')
   }
 
@@ -293,6 +347,7 @@
   function setButtonState(button, state, errorMessage) {
     const labels = {
       copy: '复制接口名称、请求参数和响应字段类型',
+      group: '复制该分组全部接口',
       url: '仅复制接口路径',
       loading: '正在读取接口信息',
       success: '已复制',
@@ -355,7 +410,52 @@
     }
   }
 
+  async function copyGroup(group, button) {
+    const groupName = getGroupName(group)
+    if (!groupName) return
+
+    button.disabled = true
+    setButtonState(button, 'loading')
+
+    try {
+      const spec = await getSpec()
+      const operations = getGroupOperations(spec, groupName)
+      if (!operations.length) throw new Error(`Swagger JSON 中没有找到分组：${groupName}`)
+
+      GM_setClipboard(formatGroup(spec, groupName, operations), 'text')
+      setButtonState(button, 'success')
+      showToast(`已复制 ${groupName}：${operations.length} 个接口`)
+    } catch (error) {
+      console.error('[Swagger 分组复制]', error)
+      setButtonState(button, 'error', error.message)
+      showToast(error.message || '分组复制失败', true)
+    } finally {
+      setTimeout(() => {
+        if (!button.isConnected) return
+        button.disabled = false
+        setButtonState(button, 'group')
+      }, 1500)
+    }
+  }
+
   function addCopyButtons() {
+    document.querySelectorAll('.opblock-tag').forEach((group) => {
+      if (group.querySelector(`.${GROUP_BUTTON_CLASS}`)) return
+
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = `${BUTTON_CLASS} ${GROUP_BUTTON_CLASS}`
+      button.dataset.action = 'group'
+      setButtonState(button, 'group')
+      button.addEventListener('click', (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        copyGroup(group, button)
+      })
+
+      group.insertBefore(button, group.querySelector('.expand-operation'))
+    })
+
     document.querySelectorAll('.opblock-summary').forEach((summary) => {
       const authorizationButton = summary.querySelector('.authorization__btn')
       let actions = summary.querySelector(`.${ACTIONS_CLASS}`)
