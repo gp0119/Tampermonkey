@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Swagger 接口信息复制
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.1.0
-// @description  在 Swagger 接口和分组后添加按钮，复制接口名称、请求参数和响应字段类型
+// @version      1.2.0
+// @description  在 Swagger 接口后添加复制和批量选择功能
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.user.js
 // @match        *://*.chaomeifan.com/api/*/swagger-ui.html*
@@ -16,19 +16,22 @@
 
   const BUTTON_CLASS = 'swagger-copy-interface-button'
   const ACTIONS_CLASS = 'swagger-copy-interface-actions'
-  const GROUP_BUTTON_CLASS = 'swagger-copy-group-button'
+  const CHECKBOX_CLASS = 'swagger-copy-interface-checkbox'
+  const GROUP_CHECKBOX_CLASS = 'swagger-copy-group-checkbox'
+  const SELECTION_BAR_CLASS = 'swagger-copy-selection-bar'
   const MAX_SCHEMA_DEPTH = 8
   const HTTP_METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch']
   const specCache = new Map()
   const BUTTON_ICONS = {
     copy: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path></svg>',
-    group: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h11M8 12h11M8 18h11"></path><path d="M4 6h.01M4 12h.01M4 18h.01"></path></svg>',
     url: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15"></path></svg>',
     loading: '<svg class="is-spinning" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path></svg>',
     success: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg>',
     error: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m9 9 6 6m0-6-6 6"></path></svg>',
   }
   let scanScheduled = false
+  let activeSpecUrl = ''
+  const selectedOperations = new Set()
 
   GM_addStyle(`
     .${BUTTON_CLASS} {
@@ -59,8 +62,61 @@
       margin: 0 10px;
     }
 
-    .${GROUP_BUTTON_CLASS} {
-      margin-left: 10px !important;
+    .${CHECKBOX_CLASS} {
+      flex: 0 0 auto;
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: #4990e2;
+      cursor: pointer;
+    }
+
+    .${GROUP_CHECKBOX_CLASS} {
+      margin-left: 10px;
+    }
+
+    .${SELECTION_BAR_CLASS} {
+      position: fixed;
+      z-index: 9999;
+      bottom: 24px;
+      left: 50%;
+      display: none;
+      align-items: center;
+      gap: 12px;
+      transform: translateX(-50%);
+      padding: 10px 14px;
+      border: 1px solid #d9d9d9;
+      border-radius: 6px;
+      background: #fff;
+      color: #3b4151;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .${SELECTION_BAR_CLASS}.is-visible {
+      display: flex;
+    }
+
+    .${SELECTION_BAR_CLASS} button {
+      padding: 6px 10px;
+      border: 1px solid #4990e2;
+      border-radius: 4px;
+      background: #4990e2;
+      color: #fff;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .${SELECTION_BAR_CLASS} button[data-action='clear'] {
+      border-color: #999;
+      background: #fff;
+      color: #555;
+    }
+
+    .${SELECTION_BAR_CLASS} button:disabled {
+      cursor: wait;
+      opacity: 0.7;
     }
 
     .${BUTTON_CLASS} svg {
@@ -272,7 +328,7 @@
   }
 
   function getGroupName(group) {
-    return cleanText(group.querySelector('a')?.textContent)
+    return cleanText(group?.querySelector('a')?.textContent)
   }
 
   function getGroupOperations(spec, groupName) {
@@ -291,13 +347,13 @@
     return operations
   }
 
-  function formatGroup(spec, groupName, operations) {
+  function formatSelectedOperations(spec, operations) {
     const referencedSchemas = new Map()
-    const lines = [`接口分组：${groupName}`, `接口数量：${operations.length}`]
+    const lines = [`已选接口：${operations.length} 个`]
 
     operations.forEach(({ path, method, operation, pathItem }, index) => {
       lines.push('', `===== 接口 ${index + 1} =====`)
-      lines.push(formatOperation(spec, path, method, operation, pathItem, { includeGroup: false, referencedSchemas }))
+      lines.push(formatOperation(spec, path, method, operation, pathItem, { referencedSchemas }))
     })
 
     const schemaLines = []
@@ -310,6 +366,29 @@
 
     if (schemaLines.length) lines.push('', '===== 共用数据结构 =====', ...schemaLines)
     return lines.join('\n')
+  }
+
+  function operationKey(method, path) {
+    try {
+      return `${method.toLowerCase()} ${decodeURIComponent(path)}`
+    } catch {
+      return `${method.toLowerCase()} ${path}`
+    }
+  }
+
+  function getSelectedOperationDetails(spec) {
+    const operations = []
+
+    Object.entries(spec.paths || {}).forEach(([path, pathItem]) => {
+      HTTP_METHODS.forEach((method) => {
+        const operation = pathItem[method]
+        if (operation && selectedOperations.has(operationKey(method, path))) {
+          operations.push({ path, method, operation, pathItem })
+        }
+      })
+    })
+
+    return operations
   }
 
   function getSpecUrl() {
@@ -347,7 +426,6 @@
   function setButtonState(button, state, errorMessage) {
     const labels = {
       copy: '复制接口名称、请求参数和响应字段类型',
-      group: '复制该分组全部接口',
       url: '仅复制接口路径',
       loading: '正在读取接口信息',
       success: '已复制',
@@ -410,50 +488,159 @@
     }
   }
 
-  async function copyGroup(group, button) {
+  function ensureSelectionBar() {
+    let bar = document.querySelector(`.${SELECTION_BAR_CLASS}`)
+    if (bar) return bar
+
+    bar = document.createElement('div')
+    bar.className = SELECTION_BAR_CLASS
+    bar.setAttribute('role', 'toolbar')
+    bar.setAttribute('aria-label', '批量复制接口')
+
+    const count = document.createElement('span')
+    count.dataset.role = 'count'
+    count.setAttribute('aria-live', 'polite')
+    bar.appendChild(count)
+
+    const copyButton = document.createElement('button')
+    copyButton.type = 'button'
+    copyButton.dataset.action = 'copy'
+    copyButton.textContent = '复制选中接口'
+    copyButton.addEventListener('click', () => copySelectedOperations(copyButton))
+    bar.appendChild(copyButton)
+
+    const clearButton = document.createElement('button')
+    clearButton.type = 'button'
+    clearButton.dataset.action = 'clear'
+    clearButton.textContent = '清空选中'
+    clearButton.addEventListener('click', clearSelectedOperations)
+    bar.appendChild(clearButton)
+
+    document.body.appendChild(bar)
+    return bar
+  }
+
+  async function updateGroupCheckboxes() {
+    const specUrl = getSpecUrl()
+    const checkboxes = document.querySelectorAll(`.${GROUP_CHECKBOX_CLASS}`)
+    if (!specUrl || !checkboxes.length) return
+
+    if (!selectedOperations.size) {
+      checkboxes.forEach((checkbox) => {
+        checkbox.checked = false
+        checkbox.indeterminate = false
+      })
+      return
+    }
+
+    try {
+      const spec = await getSpec()
+      if (getSpecUrl() !== specUrl) return
+
+      checkboxes.forEach((checkbox) => {
+        const groupName = getGroupName(checkbox.closest('.opblock-tag'))
+        const operations = getGroupOperations(spec, groupName)
+        const selectedCount = operations.filter(({ method, path }) => selectedOperations.has(operationKey(method, path))).length
+        checkbox.checked = operations.length > 0 && selectedCount === operations.length
+        checkbox.indeterminate = selectedCount > 0 && selectedCount < operations.length
+      })
+    } catch (error) {
+      console.debug('[Swagger 分组选择状态]', error)
+    }
+  }
+
+  function updateSelectionUi() {
+    document.querySelectorAll(`.${CHECKBOX_CLASS}[data-action='select-interface']`).forEach((checkbox) => {
+      checkbox.checked = selectedOperations.has(checkbox.dataset.operationKey)
+    })
+
+    const bar = ensureSelectionBar()
+    const countText = `已选 ${selectedOperations.size} 个接口`
+    const count = bar.querySelector('[data-role="count"]')
+    if (count.textContent !== countText) count.textContent = countText
+    bar.classList.toggle('is-visible', selectedOperations.size > 0)
+    updateGroupCheckboxes()
+  }
+
+  function clearSelectedOperations() {
+    selectedOperations.clear()
+    updateSelectionUi()
+  }
+
+  function setOperationSelected(method, path, selected) {
+    const key = operationKey(method, path)
+    if (selected) selectedOperations.add(key)
+    else selectedOperations.delete(key)
+    updateSelectionUi()
+  }
+
+  async function setGroupSelected(group, checkbox) {
     const groupName = getGroupName(group)
     if (!groupName) return
 
-    button.disabled = true
-    setButtonState(button, 'loading')
-
+    const shouldSelect = checkbox.checked
+    checkbox.disabled = true
     try {
       const spec = await getSpec()
       const operations = getGroupOperations(spec, groupName)
       if (!operations.length) throw new Error(`Swagger JSON 中没有找到分组：${groupName}`)
 
-      GM_setClipboard(formatGroup(spec, groupName, operations), 'text')
-      setButtonState(button, 'success')
-      showToast(`已复制 ${groupName}：${operations.length} 个接口`)
+      operations.forEach(({ method, path }) => {
+        const key = operationKey(method, path)
+        if (shouldSelect) selectedOperations.add(key)
+        else selectedOperations.delete(key)
+      })
+      updateSelectionUi()
     } catch (error) {
-      console.error('[Swagger 分组复制]', error)
-      setButtonState(button, 'error', error.message)
-      showToast(error.message || '分组复制失败', true)
+      console.error('[Swagger 分组选择]', error)
+      showToast(error.message || '分组选择失败', true)
+      checkbox.checked = !shouldSelect
+      updateGroupCheckboxes()
     } finally {
-      setTimeout(() => {
-        if (!button.isConnected) return
-        button.disabled = false
-        setButtonState(button, 'group')
-      }, 1500)
+      checkbox.disabled = false
+    }
+  }
+
+  async function copySelectedOperations(button) {
+    button.disabled = true
+    button.textContent = '复制中…'
+
+    try {
+      const spec = await getSpec()
+      const operations = getSelectedOperationDetails(spec)
+      if (!operations.length) throw new Error('没有找到已选接口')
+
+      GM_setClipboard(formatSelectedOperations(spec, operations), 'text')
+      showToast(`已复制 ${operations.length} 个接口`)
+    } catch (error) {
+      console.error('[Swagger 批量复制]', error)
+      showToast(error.message || '批量复制失败', true)
+    } finally {
+      button.disabled = false
+      button.textContent = '复制选中接口'
     }
   }
 
   function addCopyButtons() {
+    const specUrl = getSpecUrl()
+    if (specUrl && activeSpecUrl && specUrl !== activeSpecUrl) clearSelectedOperations()
+    if (specUrl) activeSpecUrl = specUrl
+
     document.querySelectorAll('.opblock-tag').forEach((group) => {
-      if (group.querySelector(`.${GROUP_BUTTON_CLASS}`)) return
+      if (group.querySelector(`.${GROUP_CHECKBOX_CLASS}`)) return
 
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.className = `${BUTTON_CLASS} ${GROUP_BUTTON_CLASS}`
-      button.dataset.action = 'group'
-      setButtonState(button, 'group')
-      button.addEventListener('click', (event) => {
-        event.preventDefault()
+      const checkbox = document.createElement('input')
+      checkbox.type = 'checkbox'
+      checkbox.className = `${CHECKBOX_CLASS} ${GROUP_CHECKBOX_CLASS}`
+      const label = `全选或取消全选分组：${getGroupName(group)}`
+      checkbox.title = label
+      checkbox.setAttribute('aria-label', label)
+      checkbox.addEventListener('click', (event) => {
         event.stopPropagation()
-        copyGroup(group, button)
       })
+      checkbox.addEventListener('change', () => setGroupSelected(group, checkbox))
 
-      group.insertBefore(button, group.querySelector('.expand-operation'))
+      group.insertBefore(checkbox, group.querySelector('.expand-operation'))
     })
 
     document.querySelectorAll('.opblock-summary').forEach((summary) => {
@@ -496,7 +683,28 @@
         })
         actions.appendChild(button)
       }
+
+      if (!summary.querySelector(`.${CHECKBOX_CLASS}[data-action='select-interface']`)) {
+        const method = summary.querySelector('.opblock-summary-method')?.textContent?.trim().toLowerCase()
+        const path = summary.querySelector('.opblock-summary-path span')?.textContent?.trim()
+        if (!method || !path) return
+
+        const checkbox = document.createElement('input')
+        checkbox.type = 'checkbox'
+        checkbox.className = CHECKBOX_CLASS
+        checkbox.dataset.action = 'select-interface'
+        checkbox.dataset.operationKey = operationKey(method, path)
+        checkbox.checked = selectedOperations.has(checkbox.dataset.operationKey)
+        const label = `选择接口：${method.toUpperCase()} ${path}`
+        checkbox.title = label
+        checkbox.setAttribute('aria-label', label)
+        checkbox.addEventListener('click', (event) => event.stopPropagation())
+        checkbox.addEventListener('change', () => setOperationSelected(method, path, checkbox.checked))
+        actions.appendChild(checkbox)
+      }
     })
+
+    updateSelectionUi()
   }
 
   function scheduleButtonScan() {
