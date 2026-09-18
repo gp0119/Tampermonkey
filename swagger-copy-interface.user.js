@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Swagger 接口信息复制
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.2.1
+// @version      1.2.2
 // @description  在 Swagger 接口后添加复制和批量选择功能
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.user.js
@@ -345,7 +345,7 @@
     return operations
   }
 
-  function formatSelectedOperations(spec, operations) {
+  function formatOperations(spec, operations) {
     const referencedSchemas = new Map()
     const lines = []
 
@@ -469,7 +469,7 @@
       const operation = pathItem?.[method]
       if (!operation) throw new Error(`Swagger JSON 中没有找到 ${method.toUpperCase()} ${path}`)
 
-      const text = formatOperation(spec, normalizedPath, method, operation, pathItem)
+      const text = formatOperations(spec, [{ path: normalizedPath, method, operation, pathItem }])
       GM_setClipboard(text, 'text')
       setButtonState(button, 'success')
       showToast(`已复制：${cleanText(operation.summary) || normalizedPath}`)
@@ -611,7 +611,7 @@
       const operations = getSelectedOperationDetails(spec)
       if (!operations.length) throw new Error('没有找到已选接口')
 
-      GM_setClipboard(formatSelectedOperations(spec, operations), 'text')
+      GM_setClipboard(formatOperations(spec, operations), 'text')
       showToast(`已复制 ${operations.length} 个接口`)
     } catch (error) {
       console.error('[Swagger 批量复制]', error)
