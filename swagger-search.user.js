@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Swagger 接口 URL 搜索
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.1.10
+// @version      1.1.11
 // @description  按 URL 跨 Select a spec 分组搜索 Swagger 接口，并跳转到对应分组
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-search.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-search.user.js
@@ -26,11 +26,16 @@
 
   GM_addStyle(`
     .${ROOT_CLASS} {
+      display: none;
       position: relative;
       z-index: 20;
       width: 100%;
       margin: 16px 0 4px;
       font-family: sans-serif;
+    }
+
+    .swagger-ui .info:has(.title) .${ROOT_CLASS} {
+      display: block;
     }
 
     .${ROOT_CLASS}-box {
@@ -660,7 +665,8 @@
 
   function getAnchor() {
     const info = document.querySelector('.swagger-ui .info')
-    return info?.querySelector('.description') || info
+    if (!info?.querySelector('.title')) return null
+    return info.querySelector('.description') || info
   }
 
   function createRoot() {
@@ -812,11 +818,13 @@
 
   let searchRoot = null
   let scanScheduled = false
-  let pageReady = false
 
   function mountSearch() {
     const anchor = getAnchor()
-    if (!anchor) return
+    if (!anchor) {
+      searchRoot?.remove()
+      return
+    }
 
     if (!searchRoot) searchRoot = createRoot()
     if (anchor.classList.contains('info')) {
@@ -827,7 +835,7 @@
   }
 
   function scheduleMount() {
-    if (!pageReady || scanScheduled) return
+    if (scanScheduled) return
     scanScheduled = true
     requestAnimationFrame(() => {
       scanScheduled = false
@@ -840,14 +848,6 @@
     subtree: true,
   })
 
-  function startMounting() {
-    requestAnimationFrame(() => {
-      pageReady = true
-      scheduleMount()
-    })
-  }
-
-  if (document.readyState === 'complete') startMounting()
-  else window.addEventListener('load', startMounting, { once: true })
+  scheduleMount()
   resumePendingJump()
 })()
