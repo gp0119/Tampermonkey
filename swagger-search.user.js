@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Swagger 接口 URL 搜索
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.1.8
+// @version      1.1.10
 // @description  按 URL 跨 Select a spec 分组搜索 Swagger 接口，并跳转到对应分组
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-search.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-search.user.js
@@ -21,7 +21,7 @@
   let operations = []
   let activeIndex = -1
   let loadPromise = null
-  let loadProgress = { loaded: 0, total: 0 }
+  let loadProgress = { loaded: 0, total: 0, failed: 0 }
   let rerenderSearch = () => {}
 
   GM_addStyle(`
@@ -228,16 +228,12 @@
     const base = swaggerBaseUrl()
     if (!raw) return base
 
-    if (/^https?:\/\//i.test(raw)) {
-      const parsed = new URL(raw)
-      const basePath = new URL(base).pathname.replace(/\/$/, '')
-      if (parsed.origin === location.origin && /^\/v[23]\/api-docs$/i.test(parsed.pathname) && basePath) {
-        return `${parsed.origin}${basePath}${parsed.pathname}${parsed.search}`
-      }
-      return parsed.href
+    const parsed = new URL(raw, base)
+    const basePath = new URL(base).pathname.replace(/\/$/, '')
+    if (parsed.origin === location.origin && /^\/v[23]\/api-docs$/i.test(parsed.pathname) && basePath) {
+      parsed.pathname = `${basePath}${parsed.pathname}`
     }
-
-    return new URL(raw.replace(/^\//, ''), base).href
+    return parsed.href
   }
 
   function urlsMatch(left, right) {
@@ -418,7 +414,7 @@
     loadPromise = listSpecs()
       .then(async (specs) => {
         operations = []
-        loadProgress = { loaded: 0, total: specs.length }
+        loadProgress = { loaded: 0, total: specs.length, failed: 0 }
         rerenderSearch()
 
         await Promise.all(
@@ -427,6 +423,7 @@
               const spec = await fetchSpec(specInfo.url)
               operations = operations.concat(collectOperations(spec, specInfo))
             } catch (error) {
+              loadProgress.failed += 1
               console.error('[Swagger 搜索]', specInfo.name, error)
             } finally {
               loadProgress.loaded += 1
@@ -434,6 +431,7 @@
             }
           })
         )
+        if (loadProgress.failed) loadPromise = null
         return operations
       })
       .catch((error) => {
@@ -515,14 +513,9 @@
     return window.ui || window.swaggerUi || null
   }
 
-  function currentPrimaryName() {
-    return new URLSearchParams(location.search).get('urls.primaryName') || ''
-  }
-
   function isCurrentSpec(item) {
     if (!item?.specUrl && !item?.specName) return true
-    if (item.specName && currentPrimaryName() === item.specName) return true
-    return urlsMatch(getCurrentSpecUrl(), item.specUrl)
+    return urlsMatch(getCurrentSpecUrl() || getUi()?.specSelectors?.url?.(), item.specUrl)
   }
 
   function triggerSelectChange(select, value) {
@@ -541,12 +534,13 @@
 
   function pathMatches(shown, expected) {
     if (!shown || !expected) return false
+    if (shown === expected) return true
     try {
       shown = decodeURIComponent(shown)
     } catch (error) {
       // keep original
     }
-    return shown === expected || shown.endsWith(expected) || expected.endsWith(shown)
+    return shown === expected
   }
 
   function findTagButton(tagName) {
@@ -665,7 +659,8 @@
   }
 
   function getAnchor() {
-    return document.querySelector('.info .description') || document.querySelector('.info')
+    const info = document.querySelector('.swagger-ui .info')
+    return info?.querySelector('.description') || info
   }
 
   function createRoot() {
@@ -705,6 +700,9 @@
     }
 
     function loadStatus() {
+      if (loadProgress.failed && loadProgress.loaded >= loadProgress.total) {
+        return `${loadProgress.failed} 个分组加载失败`
+      }
       if (!loadProgress.total || loadProgress.loaded >= loadProgress.total) return ''
       return `加载 ${loadProgress.loaded}/${loadProgress.total}`
     }
@@ -715,6 +713,7 @@
       meta.textContent = raw.trim()
         ? `${results.length}${results.length === MAX_RESULTS ? '+' : ''} 条${loading ? ` · ${loading}` : ''}`
         : loading
+      input.title = loadProgress.failed ? '部分分组加载失败，重新输入或聚焦可重试' : ''
 
       if (!raw.trim()) {
         closeList()
@@ -723,7 +722,11 @@
       }
 
       if (!results.length) {
-        const empty = loading ? '正在加载其他分组…' : '全部分组中都没有匹配的接口'
+        const empty = loadProgress.loaded < loadProgress.total
+          ? '正在加载其他分组…'
+          : loadProgress.failed
+            ? '部分分组加载失败，已加载分组中没有匹配的接口；重新输入或聚焦可重试'
+            : '全部分组中都没有匹配的接口'
         list.innerHTML = `<div class="${ROOT_CLASS}-empty">${empty}</div>`
         list.classList.add('is-open')
         activeIndex = -1
@@ -809,6 +812,7 @@
 
   let searchRoot = null
   let scanScheduled = false
+  let pageReady = false
 
   function mountSearch() {
     const anchor = getAnchor()
@@ -823,7 +827,7 @@
   }
 
   function scheduleMount() {
-    if (scanScheduled) return
+    if (!pageReady || scanScheduled) return
     scanScheduled = true
     requestAnimationFrame(() => {
       scanScheduled = false
@@ -835,6 +839,15 @@
     childList: true,
     subtree: true,
   })
-  scheduleMount()
+
+  function startMounting() {
+    requestAnimationFrame(() => {
+      pageReady = true
+      scheduleMount()
+    })
+  }
+
+  if (document.readyState === 'complete') startMounting()
+  else window.addEventListener('load', startMounting, { once: true })
   resumePendingJump()
 })()
