@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Swagger 接口信息复制
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.2.2
+// @version      1.2.3
 // @description  在 Swagger 接口后添加复制和批量选择功能
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.user.js
 // @match        *://*.chaomeifan.com/api/*/swagger-ui.html*
+// @match        *://*.chaomeifan.com/swagger-ui.html*
 // @run-at       document-idle
 // @grant        GM_addStyle
 // @grant        GM_setClipboard
