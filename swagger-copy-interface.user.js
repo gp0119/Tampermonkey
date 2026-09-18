@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Swagger 接口信息复制
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.2.0
+// @version      1.2.1
 // @description  在 Swagger 接口后添加复制和批量选择功能
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-copy-interface.user.js
@@ -255,6 +255,11 @@
       lines.push(`${indentation}- ${name}：${describeType(fieldSchema)}${describeRules(fieldSchema, requiredFields.has(name))}`)
       appendSchemaFields(fieldSchema, spec, lines, depth + 1, seenRefs, referencedSchemas)
     })
+
+    if (typeof schema.additionalProperties === 'object' && schema.additionalProperties !== null) {
+      lines.push(`${'  '.repeat(depth)}- [key]：${describeType(schema.additionalProperties)}`)
+      appendSchemaFields(schema.additionalProperties, spec, lines, depth + 1, seenRefs, referencedSchemas)
+    }
   }
 
   function resolveParameter(parameter, spec) {
@@ -265,35 +270,28 @@
     return response.$ref ? resolveRef(response.$ref, spec) || response : response
   }
 
-  function buildFullUrl(spec, path) {
-    const scheme = (spec.schemes && spec.schemes[0]) || location.protocol.replace(':', '')
-    const host = spec.host || location.host
-    const basePath = String(spec.basePath || '').replace(/\/$/, '')
-    return `${scheme}://${host}${basePath}${path}`
-  }
-
   function formatOperation(spec, path, method, operation, pathItem, options = {}) {
     const lines = []
     const title = cleanText(operation.summary || operation.description) || '未命名接口'
-    const { includeGroup = true, referencedSchemas } = options
+    const { referencedSchemas } = options
 
-    lines.push(`接口名称：${title}`)
-    if (includeGroup && operation.tags && operation.tags.length) lines.push(`所属分组：${operation.tags.join('、')}`)
-    lines.push(`请求方法：${method.toUpperCase()}`)
-    lines.push(`接口路径：${path}`)
-    lines.push(`完整地址：${buildFullUrl(spec, path)}`)
+    lines.push(title, `${method.toUpperCase()} ${path}`)
     const description = cleanText(operation.description)
     if (description && description !== title) lines.push(`说明：${description}`)
 
     const consumes = operation.consumes || spec.consumes
     if (consumes && consumes.length) lines.push(`请求类型：${consumes.join('、')}`)
 
-    lines.push('', '请求参数：')
-    const parameters = [...(pathItem.parameters || []), ...(operation.parameters || [])].map((item) => resolveParameter(item, spec))
+    const parameters = new Map()
+    ;[...(pathItem.parameters || []), ...(operation.parameters || [])].forEach((item) => {
+      const parameter = resolveParameter(item, spec)
+      parameters.set(`${parameter.in}:${parameter.name}`, parameter)
+    })
 
-    if (!parameters.length) {
-      lines.push('- 无')
+    if (!parameters.size) {
+      lines.push('', '参数：无')
     } else {
+      lines.push('', '参数：')
       parameters.forEach((parameter) => {
         const schema = parameter.schema || parameter
         const descriptionText = cleanText(parameter.description)
@@ -349,10 +347,10 @@
 
   function formatSelectedOperations(spec, operations) {
     const referencedSchemas = new Map()
-    const lines = [`已选接口：${operations.length} 个`]
+    const lines = []
 
     operations.forEach(({ path, method, operation, pathItem }, index) => {
-      lines.push('', `===== 接口 ${index + 1} =====`)
+      if (index > 0) lines.push('', '---', '')
       lines.push(formatOperation(spec, path, method, operation, pathItem, { referencedSchemas }))
     })
 
@@ -364,7 +362,7 @@
       appendSchemaFields(definition, spec, schemaLines, 1, new Set([refName(ref)]), referencedSchemas)
     })
 
-    if (schemaLines.length) lines.push('', '===== 共用数据结构 =====', ...schemaLines)
+    if (schemaLines.length) lines.push('', '数据结构：', ...schemaLines)
     return lines.join('\n')
   }
 
@@ -579,9 +577,11 @@
     if (!groupName) return
 
     const shouldSelect = checkbox.checked
+    const specUrl = getSpecUrl()
     checkbox.disabled = true
     try {
       const spec = await getSpec()
+      if (getSpecUrl() !== specUrl) return
       const operations = getGroupOperations(spec, groupName)
       if (!operations.length) throw new Error(`Swagger JSON 中没有找到分组：${groupName}`)
 
@@ -592,6 +592,7 @@
       })
       updateSelectionUi()
     } catch (error) {
+      if (getSpecUrl() !== specUrl) return
       console.error('[Swagger 分组选择]', error)
       showToast(error.message || '分组选择失败', true)
       checkbox.checked = !shouldSelect
