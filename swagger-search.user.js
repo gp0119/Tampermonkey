@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Swagger 接口 URL 搜索
 // @namespace    https://xt.ty.chaomeifan.com/
-// @version      1.1.12
-// @description  按 URL 跨 Select a spec 分组搜索 Swagger 接口，并跳转到对应分组
+// @version      1.1.13
+// @description  按 URL 或接口名称跨 Select a spec 分组搜索 Swagger 接口，并跳转到对应分组
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-search.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/swagger-search.user.js
 // @match        *://*.chaomeifan.com/api/*/swagger-ui.html*
@@ -183,7 +183,8 @@
       white-space: nowrap;
     }
 
-    .${ROOT_CLASS}-path mark {
+    .${ROOT_CLASS}-path mark,
+    .${ROOT_CLASS}-summary mark {
       padding: 0;
       background: #ffe58f;
       color: inherit;
@@ -459,7 +460,7 @@
     if (query.method && item.method !== query.method) return false
     if (!query.text) return !query.method
 
-    const haystack = `${item.path}\n${item.fullUrl}`.toLowerCase()
+    const haystack = `${item.path}\n${item.fullUrl}\n${item.summary}`.toLowerCase()
     return haystack.includes(query.text)
   }
 
@@ -679,7 +680,7 @@
     root.innerHTML = `
       <div class="${ROOT_CLASS}-box">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
-        <input class="${ROOT_CLASS}-input" type="search" placeholder="按接口 URL 搜索，例如 /user/list 或 GET /order" autocomplete="off" />
+        <input class="${ROOT_CLASS}-input" type="search" placeholder="按接口 URL 或名称搜索，例如 /user/list 或 新增供应商" autocomplete="off" />
         <span class="${ROOT_CLASS}-meta"></span>
       </div>
       <div class="${ROOT_CLASS}-list"></div>
@@ -742,7 +743,7 @@
 
       list.innerHTML = results
         .map((item, index) => {
-          const summary = item.summary ? `<span class="${ROOT_CLASS}-summary">${escapeHtml(item.summary)}</span>` : ''
+          const summary = item.summary ? `<span class="${ROOT_CLASS}-summary">${highlight(item.summary, query)}</span>` : ''
           return `
             <button type="button" class="${ROOT_CLASS}-item${index === 0 ? ' is-active' : ''}" data-index="${index}">
               <span class="${ROOT_CLASS}-item-main">
