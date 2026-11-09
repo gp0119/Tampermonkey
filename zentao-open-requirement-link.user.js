@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.6.2
+// @version      1.7.0
 // @description  在禅道任务列表查看需求链接和项目截止日期，并在原型目录标记任务状态
-// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.6.2
+// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.7.0
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @match        *://zentao.chaomeifan.com/*
 // @match        *://redmine.chaomeifan.com/*
@@ -25,7 +25,7 @@
   const UNFINISHED = ['wait', 'doing', 'pause']
 
   if (location.hostname === PROTOTYPE_HOST) {
-    if (window.top === window) highlightPrototypePages()
+    if (window.top === window) enhancePrototypePages()
     return
   }
 
@@ -331,41 +331,26 @@
     return paths
   }
 
-  function highlightPrototypePages() {
+  function enhancePrototypePages() {
     const url = new URL(location.href)
     const folder = normalizePath(new URL('.', url).pathname)
     const selectionKey = `${DEADLINE_PARAM}:${folder}`
     const deadline = new URLSearchParams(url.hash.slice(1)).get(DEADLINE_PARAM)
       ?? url.searchParams.get(DEADLINE_PARAM) ?? sessionStorage.getItem(selectionKey)
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(deadline)) return
-    sessionStorage.setItem(selectionKey, deadline)
-    const cohortKey = PROTOTYPE_COHORT_KEY + deadline
-    let pages = GM_getValue(cohortKey) ?? GM_getValue('prototypeTaskCohort:' + deadline, {})
-    let pathsById
+    const cohortKey = /^\d{4}-\d{2}-\d{2}$/.test(deadline) ? PROTOTYPE_COHORT_KEY + deadline : null
     let tree = document.getElementById('sitemapTreeContainer')
+    if (!cohortKey && !tree && !document.getElementById('mainFrame')) return
+
+    let stopSidebarLayout = tree ? mountPrototypeSidebar(tree) : undefined
+    let pages
+    let pathsById
+    if (cohortKey) {
+      sessionStorage.setItem(selectionKey, deadline)
+      pages = GM_getValue(cohortKey) ?? GM_getValue('prototypeTaskCohort:' + deadline, {})
+      addPrototypeStatusStyles()
+    }
 
     const labels = ['已关闭或取消', '已完成', '未完成']
-    const style = document.createElement('style')
-    style.textContent = `
-      #sitemapTreeContainer [data-zentao-task-state] .sitemapPageName {
-        font-weight: 600;
-        border-radius: 3px;
-      }
-      #sitemapTreeContainer [data-zentao-task-state="2"] .sitemapPageName {
-        background: #ffeb9e;
-        color: #613b00;
-      }
-      #sitemapTreeContainer [data-zentao-task-state="1"] .sitemapPageName {
-        background: #d1f0d8;
-        color: #185528;
-      }
-      #sitemapTreeContainer [data-zentao-task-state="0"] .sitemapPageName {
-        background: #e9ecef;
-        color: #424a53;
-      }
-    `
-    document.head.append(style)
-
     const highlight = () => {
       if (!tree) return
       pathsById ??= readPrototypePathsById(url, folder)
@@ -394,11 +379,7 @@
         link.title = labels[state]
         if (previous !== undefined) continue
 
-        // 用原型自己的展开控件显示任务，保留目录的交互状态。
-        for (let node = link.closest('.sitemapNode').parentElement; node; node = node.parentElement) {
-          if (!node.matches('.sitemapExpandableNode')) continue
-          node.querySelector(':scope > div .sitemapPlusMinusLink:has(.sitemapPlus)')?.click()
-        }
+        expandPrototypeParents(link)
       }
     }
     let scheduled = false
@@ -413,7 +394,11 @@
     new MutationObserver((mutations) => {
       const previousTree = tree
       tree = document.getElementById('sitemapTreeContainer')
-      if (!tree) return
+      if (tree !== previousTree) {
+        stopSidebarLayout?.()
+        stopSidebarLayout = tree ? mountPrototypeSidebar(tree) : undefined
+      }
+      if (!tree || !cohortKey) return
 
       // 原型的目录数据可能晚于 DOM 就绪。
       const previousPaths = pathsById
@@ -422,10 +407,109 @@
         scheduleHighlight()
       }
     }).observe(document.body, { childList: true, subtree: true })
+    if (!cohortKey) return
     GM_addValueChangeListener(cohortKey, (_key, _oldPages, newPages) => {
       pages = newPages
       scheduleHighlight()
     })
     highlight()
+  }
+
+  function mountPrototypeSidebar(tree) {
+    const panel = tree.closest('.leftPanel')
+    const splitter = document.getElementById('lsplitbar')
+    let autoWidth = true
+    let revealedPage
+    let frame
+
+    const disableAutoWidth = () => { autoWidth = false }
+    splitter?.addEventListener('pointerdown', disableAutoWidth, { once: true })
+
+    const layout = () => {
+      frame = undefined
+      if (!tree.clientWidth || !tree.clientHeight) {
+        revealedPage = undefined
+        return
+      }
+
+      const page = tree.querySelector('.sitemapHighlight')
+      if (page && page !== revealedPage) expandPrototypeParents(page)
+      if (autoWidth && panel) widenPrototypeSidebar(panel, tree)
+
+      if (!page || page === revealedPage || !page.offsetHeight) return
+      const row = page.getBoundingClientRect()
+      const top = tree.getBoundingClientRect().top + tree.clientTop
+      const bottom = top + tree.clientHeight
+      const delta = row.top < top ? row.top - top : Math.max(0, row.bottom - bottom)
+      const previousScroll = tree.scrollTop
+      if (delta) tree.scrollTop += delta
+      // 分组展开期间，当前的滚动范围可能还到不了目标行。
+      if (Math.abs(tree.scrollTop - previousScroll - delta) < 1) revealedPage = page
+    }
+    const scheduleLayout = () => { frame ??= requestAnimationFrame(layout) }
+
+    const selectionObserver = new MutationObserver(scheduleLayout)
+    selectionObserver.observe(tree, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] })
+    const sizeObserver = new ResizeObserver(scheduleLayout)
+    sizeObserver.observe(tree)
+    const list = tree.querySelector('.sitemapTree')
+    if (list) sizeObserver.observe(list)
+    window.addEventListener('resize', scheduleLayout)
+    scheduleLayout()
+
+    return () => {
+      selectionObserver.disconnect()
+      sizeObserver.disconnect()
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      splitter?.removeEventListener('pointerdown', disableAutoWidth)
+      window.removeEventListener('resize', scheduleLayout)
+    }
+  }
+
+  function widenPrototypeSidebar(panel, tree) {
+    const overflow = tree.scrollWidth - tree.clientWidth
+    if (overflow <= 0) return
+    const player = unsafeWindow.$axure?.player
+    if (!player?.resizeContent || player.isMobileMode?.()) return
+
+    const rightWidth = document.querySelector('.rightPanel')?.offsetWidth ?? 0
+    const maxWidth = Math.floor(Math.min(window.innerWidth * 0.45, window.innerWidth - rightWidth - 320))
+    const width = panel.offsetWidth
+    const fittedWidth = Math.min(width + overflow, maxWidth)
+    if (fittedWidth <= width) return
+
+    panel.style.width = `${fittedWidth}px`
+    player.resizeContent()
+  }
+
+  function expandPrototypeParents(row) {
+    // 通过 Axure 的展开控件同步目录的交互状态。
+    for (let node = row.closest('.sitemapNode').parentElement; node; node = node.parentElement) {
+      if (!node.matches('.sitemapExpandableNode')) continue
+      node.querySelector(':scope > div .sitemapPlusMinusLink:has(.sitemapPlus)')?.click()
+    }
+  }
+
+  function addPrototypeStatusStyles() {
+    const style = document.createElement('style')
+    style.textContent = `
+      #sitemapTreeContainer [data-zentao-task-state] .sitemapPageName {
+        font-weight: 600;
+        border-radius: 3px;
+      }
+      #sitemapTreeContainer [data-zentao-task-state="2"] .sitemapPageName {
+        background: #ffeb9e;
+        color: #613b00;
+      }
+      #sitemapTreeContainer [data-zentao-task-state="1"] .sitemapPageName {
+        background: #d1f0d8;
+        color: #185528;
+      }
+      #sitemapTreeContainer [data-zentao-task-state="0"] .sitemapPageName {
+        background: #e9ecef;
+        color: #424a53;
+      }
+    `
+    document.head.append(style)
   }
 })()
