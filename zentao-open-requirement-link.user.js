@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.5.1
+// @version      1.6.0
 // @description  在禅道任务列表查看需求链接和项目截止日期，并在原型目录标记任务状态
-// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
+// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.6.0
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @match        *://zentao.chaomeifan.com/*
 // @match        *://redmine.chaomeifan.com/*
@@ -166,6 +166,31 @@
     return buttons
   }
 
+  function addPrototypeLabel(button, folder) {
+    const segments = folder.split('/').filter(Boolean).slice(-2)
+    if (!segments.length) return
+
+    let name = segments.join(' · ')
+    try {
+      name = segments.map(decodeURIComponent).join(' · ')
+    } catch {
+      // 需求地址包含无法解码的路径时，显示原路径名称。
+    }
+    const label = document.createElement('span')
+    label.className = 'label label-light'
+    label.textContent = name
+    label.title = name
+    Object.assign(label.style, {
+      marginInlineStart: 'auto',
+      maxWidth: '40%',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+    })
+    button.style.marginInlineStart = '0'
+    button.before(label)
+  }
+
   async function syncTaskLinks(buttons, projectDeadlines, selectedDate) {
     const [tasks, deadlines] = await Promise.all([readAssignedTasks(), projectDeadlines])
     const visibleDates = tasks.filter((task) => buttons.has(String(task.id)))
@@ -183,10 +208,12 @@
       visible: tasks.some((task) => buttons.has(String(task.id))),
     })).sort((a, b) => Number(b.visible) - Number(a.visible))
 
-    const resolvedAddresses = new Map()
+    const firstPrototypeButtons = new Map()
     const applyLink = (tasks, link) => {
       if (!link) return
-      const path = prototypePagePath(new URL(link.url))
+      const url = new URL(link.url)
+      const path = prototypePagePath(url)
+      const folder = path && normalizePath(new URL('.', url).pathname)
       for (const task of tasks) {
         const end = deadlines?.get(String(task.project))
         const button = buttons.get(String(task.id))
@@ -194,7 +221,6 @@
           button.href = path && end ? linkWithDeadline(link.url, end) : link.url
           button.target = link.target || '_blank'
           button.removeAttribute('title')
-          resolvedAddresses.set(button, path ? `${path}:${end ?? ''}` : normalizePath(button.href))
         }
         const pages = cohorts.get(end)
         if (!path || !pages) continue
@@ -202,15 +228,17 @@
         // 同一日期的多个任务指向同一原型时，优先标记未完成的任务。
         const state = UNFINISHED.includes(task.status) ? 2 : Number(task.status === 'done')
         pages[path] = Math.max(pages[path] ?? 0, state)
-      }
-    }
-    const mergeDuplicateButtons = () => {
-      const seen = new Set()
-      for (const button of buttons.values()) {
-        const address = resolvedAddresses.get(button)
-        if (!address) continue
-        button.style.display = seen.has(address) ? 'none' : ''
-        seen.add(address)
+
+        if (!buttons.size) continue
+        const groupKey = `${end}:${folder}`
+        if (!firstPrototypeButtons.has(groupKey)) {
+          firstPrototypeButtons.set(groupKey, button)
+          continue
+        }
+        const first = firstPrototypeButtons.get(groupKey)
+        if (first) addPrototypeLabel(first, folder)
+        if (button) addPrototypeLabel(button, folder)
+        firstPrototypeButtons.set(groupKey, null)
       }
     }
     const publish = () => {
@@ -223,7 +251,6 @@
       applyLink(tasks, cached.link)
       return false
     })
-    mergeDuplicateButtons()
     publish()
 
     let failed = false
@@ -236,7 +263,6 @@
         GM_setValue(`storyLink:${version}`, { link, savedAt: Date.now() })
         applyLink(tasks, link)
       }))
-      mergeDuplicateButtons()
       failed ||= results.some((result) => result.status === 'rejected')
       // 提前同步当前页和首批任务，打开的原型页会随后台扫描更新。
       if (index % 24 === 0 || index + 6 >= pending.length) publish()
