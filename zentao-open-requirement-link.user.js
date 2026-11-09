@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.6.0
+// @version      1.6.1
 // @description  在禅道任务列表查看需求链接和项目截止日期，并在原型目录标记任务状态
-// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.6.0
+// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.6.1
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @match        *://zentao.chaomeifan.com/*
 // @match        *://redmine.chaomeifan.com/*
@@ -11,13 +11,14 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_addValueChangeListener
+// @grant        unsafeWindow
 // ==/UserScript==
 
 ;(function () {
   'use strict'
 
   const PROTOTYPE_HOST = 'redmine.chaomeifan.com'
-  const PROTOTYPE_COHORT_KEY = 'prototypeTaskCohort:'
+  const PROTOTYPE_COHORT_KEY = 'prototypeTaskPages:'
   const DEADLINE_PARAM = 'zentaoDeadline'
   const DETAIL_TITLE = '.detail > .detail-title'
   const TASK_LINK = '.c-name a[href*="/task-view-"]'
@@ -84,11 +85,12 @@
     const button = createLinkButton(link.url, link.target)
     const project = document.querySelector('.breadcrumb a[href*="/project-browse-"]')
     const id = project?.pathname.match(/\/project-browse-(\d+)\.html$/)?.[1]
-    if (id && prototypePagePath(new URL(link.url))) {
+    const prototype = prototypePageReference(new URL(link.url))
+    if (id && prototype) {
       const projectDeadlines = readProjectDeadlines()
       const deadline = (await projectDeadlines)?.get(id)
       if (deadline) {
-        button.href = linkWithDeadline(link.url, deadline)
+        button.href = linkWithDeadline(link.url, deadline, prototype.part)
         const refresh = () => syncTaskLinks(new Map(), projectDeadlines, deadline).catch((error) => {
           console.error('加载同截止日期的禅道任务失败', error)
         })
@@ -208,37 +210,25 @@
       visible: tasks.some((task) => buttons.has(String(task.id))),
     })).sort((a, b) => Number(b.visible) - Number(a.visible))
 
-    const firstPrototypeButtons = new Map()
     const applyLink = (tasks, link) => {
       if (!link) return
-      const url = new URL(link.url)
-      const path = prototypePagePath(url)
-      const folder = path && normalizePath(new URL('.', url).pathname)
+      const prototype = prototypePageReference(new URL(link.url))
       for (const task of tasks) {
         const end = deadlines?.get(String(task.project))
         const button = buttons.get(String(task.id))
         if (button) {
-          button.href = path && end ? linkWithDeadline(link.url, end) : link.url
+          button.href = prototype && end ? linkWithDeadline(link.url, end, prototype.part) : link.url
           button.target = link.target || '_blank'
           button.removeAttribute('title')
+          if (prototype) addPrototypeLabel(button, prototype.folder)
         }
         const pages = cohorts.get(end)
-        if (!path || !pages) continue
+        if (!prototype || !pages) continue
 
         // 同一日期的多个任务指向同一原型时，优先标记未完成的任务。
+        const { key, path } = prototype
         const state = UNFINISHED.includes(task.status) ? 2 : Number(task.status === 'done')
-        pages[path] = Math.max(pages[path] ?? 0, state)
-
-        if (!buttons.size) continue
-        const groupKey = `${end}:${folder}`
-        if (!firstPrototypeButtons.has(groupKey)) {
-          firstPrototypeButtons.set(groupKey, button)
-          continue
-        }
-        const first = firstPrototypeButtons.get(groupKey)
-        if (first) addPrototypeLabel(first, folder)
-        if (button) addPrototypeLabel(button, folder)
-        firstPrototypeButtons.set(groupKey, null)
+        pages[key] = { path, state: Math.max(pages[key]?.state ?? 0, state) }
       }
     }
     const publish = () => {
@@ -290,15 +280,22 @@
     return JSON.parse(result.data)
   }
 
-  function prototypePagePath(url) {
+  function prototypePageReference(url) {
     if (url.hostname !== PROTOTYPE_HOST) return
-    const page = new URLSearchParams(url.hash.slice(1)).get('p') ?? url.searchParams.get('p')
-    if (page) return normalizePath(new URL(`${encodeURIComponent(page)}.html`, url).pathname)
+    const hash = new URLSearchParams(url.hash.slice(1))
+    const part = hash.has('p') || (!url.searchParams.has('p') && hash.has('id')) ? 'hash' : 'search'
+    const params = part === 'hash' ? hash : url.searchParams
+    const id = params.get('id')
+    const page = params.get('p')
+    if (!id && !page) return
+
+    const folder = normalizePath(new URL('.', url).pathname)
+    const path = page ? normalizePath(new URL(`${encodeURIComponent(page)}.html`, url).pathname) : null
+    return { folder, part, path, key: id ? `${folder}#${id}` : path }
   }
 
-  function linkWithDeadline(href, deadline) {
+  function linkWithDeadline(href, deadline, part) {
     const url = new URL(href)
-    const part = new URLSearchParams(url.hash.slice(1)).has('p') ? 'hash' : 'search'
     const parameter = `${DEADLINE_PARAM}=${deadline}`
     const existing = new RegExp(`([?&#])${DEADLINE_PARAM}=[^&]*`)
     url[part] = existing.test(url[part]) ? url[part].replace(existing, `$1${parameter}`) : `${url[part]}&${parameter}`
@@ -307,6 +304,20 @@
 
   function normalizePath(path) {
     return path.replace(/%[\da-f]{2}/gi, (part) => part.toUpperCase())
+  }
+
+  function readPrototypePathsById(url, folder) {
+    const roots = unsafeWindow.$axure?.document?.sitemap?.rootNodes
+    if (!roots) return
+
+    const paths = new Map()
+    const nodes = [...roots]
+    while (nodes.length) {
+      const node = nodes.pop()
+      if (node.id && node.url) paths.set(`${folder}#${node.id}`, normalizePath(new URL(node.url, url).pathname))
+      if (node.children) nodes.push(...node.children)
+    }
+    return paths
   }
 
   function highlightPrototypePages() {
@@ -318,7 +329,8 @@
     if (!/^\d{4}-\d{2}-\d{2}$/.test(deadline)) return
     sessionStorage.setItem(selectionKey, deadline)
     const cohortKey = PROTOTYPE_COHORT_KEY + deadline
-    let pages = GM_getValue(cohortKey, {})
+    let pages = GM_getValue(cohortKey) ?? GM_getValue('prototypeTaskCohort:' + deadline, {})
+    let pathsById
 
     const labels = ['已关闭或取消', '已完成', '未完成']
     const style = document.createElement('style')
@@ -343,10 +355,20 @@
     document.head.append(style)
 
     const highlight = () => {
+      pathsById ??= readPrototypePathsById(url, folder)
+      const statesByPath = new Map()
+      for (const [key, page] of Object.entries(pages)) {
+        // 页名可能改过。按目录里的 ID 找到现用地址，再兼容旧缓存和无 ID 的链接。
+        const legacy = typeof page === 'number'
+        const path = legacy ? key : pathsById?.get(key) ?? page.path
+        if (!path) continue
+        const state = legacy ? page : page.state
+        statesByPath.set(path, Math.max(statesByPath.get(path) ?? 0, state))
+      }
       for (const link of document.querySelectorAll('#sitemapTreeContainer .sitemapPageLink[nodeurl]')) {
         const path = normalizePath(new URL(link.getAttribute('nodeurl'), location.href).pathname)
         const previous = link.dataset.zentaoTaskState
-        const state = pages[path]
+        const state = statesByPath.get(path)
         if (state === undefined) {
           if (previous !== undefined) {
             delete link.dataset.zentaoTaskState
