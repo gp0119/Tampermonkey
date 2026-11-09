@@ -3,6 +3,8 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.0.0
 // @description  在需求描述标题旁添加按钮，一键打开描述中的链接
+// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
+// @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @match        *://zentao.chaomeifan.com/*
 // @run-at       document-idle
 // @grant        none
