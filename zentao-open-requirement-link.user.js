@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.6.1
+// @version      1.6.2
 // @description  在禅道任务列表查看需求链接和项目截止日期，并在原型目录标记任务状态
-// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.6.1
+// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.6.2
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @match        *://zentao.chaomeifan.com/*
 // @match        *://redmine.chaomeifan.com/*
@@ -34,7 +34,9 @@
     if (!table) return
     const projectDeadlines = readProjectDeadlines()
     addProjectDeadlines(table, projectDeadlines)
-    syncTaskLinks(addTaskButtons(table), projectDeadlines).catch((error) => {
+    const buttons = addTaskButtons(table)
+    if (!buttons.size) return
+    syncTaskLinks(buttons, projectDeadlines).catch((error) => {
       const message = document.createElement('p')
       message.textContent = '部分需求链接未同步，请刷新页面重试。'
       message.setAttribute('role', 'status')
@@ -243,20 +245,29 @@
     })
     publish()
 
+    const concurrency = 6
+    let next = 0
+    let completed = 0
     let failed = false
-    for (let index = 0; index < pending.length; index += 6) {
-      const results = await Promise.allSettled(pending.slice(index, index + 6).map(async ({ version, tasks }) => {
-        const href = new URL(`task-view-${tasks[0].id}.json`, location.href)
-        const { task } = await fetchZenTao(href)
-        const doc = new DOMParser().parseFromString(task.storySpec ?? '', 'text/html')
-        const link = parseRequirementLink(doc, href) ?? null
-        GM_setValue(`storyLink:${version}`, { link, savedAt: Date.now() })
-        applyLink(tasks, link)
-      }))
-      failed ||= results.some((result) => result.status === 'rejected')
-      // 提前同步当前页和首批任务，打开的原型页会随后台扫描更新。
-      if (index % 24 === 0 || index + 6 >= pending.length) publish()
+    const syncPendingLinks = async () => {
+      while (next < pending.length) {
+        const { version, tasks } = pending[next++]
+        try {
+          const href = new URL(`task-view-${tasks[0].id}.json`, location.href)
+          const { task } = await fetchZenTao(href)
+          const doc = new DOMParser().parseFromString(task.storySpec ?? '', 'text/html')
+          const link = parseRequirementLink(doc, href) ?? null
+          GM_setValue(`storyLink:${version}`, { link, savedAt: Date.now() })
+          applyLink(tasks, link)
+        } catch {
+          failed = true
+        }
+        completed++
+        // 每完成一批就同步，已打开的原型页可以逐步更新。
+        if (completed % 24 === concurrency || completed === pending.length) publish()
+      }
     }
+    await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, syncPendingLinks))
     if (failed) throw new Error('部分任务详情读取失败')
   }
 
@@ -331,6 +342,7 @@
     const cohortKey = PROTOTYPE_COHORT_KEY + deadline
     let pages = GM_getValue(cohortKey) ?? GM_getValue('prototypeTaskCohort:' + deadline, {})
     let pathsById
+    let tree = document.getElementById('sitemapTreeContainer')
 
     const labels = ['已关闭或取消', '已完成', '未完成']
     const style = document.createElement('style')
@@ -355,6 +367,7 @@
     document.head.append(style)
 
     const highlight = () => {
+      if (!tree) return
       pathsById ??= readPrototypePathsById(url, folder)
       const statesByPath = new Map()
       for (const [key, page] of Object.entries(pages)) {
@@ -365,7 +378,7 @@
         const state = legacy ? page : page.state
         statesByPath.set(path, Math.max(statesByPath.get(path) ?? 0, state))
       }
-      for (const link of document.querySelectorAll('#sitemapTreeContainer .sitemapPageLink[nodeurl]')) {
+      for (const link of tree.querySelectorAll('.sitemapPageLink[nodeurl]')) {
         const path = normalizePath(new URL(link.getAttribute('nodeurl'), location.href).pathname)
         const previous = link.dataset.zentaoTaskState
         const state = statesByPath.get(path)
@@ -388,10 +401,30 @@
         }
       }
     }
-    new MutationObserver(highlight).observe(document.body, { childList: true, subtree: true })
+    let scheduled = false
+    const scheduleHighlight = () => {
+      if (scheduled) return
+      scheduled = true
+      requestAnimationFrame(() => {
+        scheduled = false
+        highlight()
+      })
+    }
+    new MutationObserver((mutations) => {
+      const previousTree = tree
+      tree = document.getElementById('sitemapTreeContainer')
+      if (!tree) return
+
+      // 原型的目录数据可能晚于 DOM 就绪。
+      const previousPaths = pathsById
+      pathsById ??= readPrototypePathsById(url, folder)
+      if (tree !== previousTree || pathsById !== previousPaths || mutations.some(({ target }) => tree.contains(target))) {
+        scheduleHighlight()
+      }
+    }).observe(document.body, { childList: true, subtree: true })
     GM_addValueChangeListener(cohortKey, (_key, _oldPages, newPages) => {
       pages = newPages
-      highlight()
+      scheduleHighlight()
     })
     highlight()
   }
