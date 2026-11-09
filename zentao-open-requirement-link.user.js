@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
+// @version      1.4.0
 // @description  在禅道任务列表查看需求链接和项目截止日期，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -17,10 +17,11 @@
   'use strict'
 
   const PROTOTYPE_HOST = 'redmine.chaomeifan.com'
-  const PROTOTYPE_PAGES_KEY = 'prototypeTaskStates'
+  const PROTOTYPE_PAGES_KEY = 'prototypeTaskDeadlines'
   const DETAIL_TITLE = '.detail > .detail-title'
   const TASK_LINK = '.c-name a[href*="/task-view-"]'
   const UNFINISHED = ['wait', 'doing', 'pause']
+  const PROJECT_DATE = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' })
 
   if (location.hostname === PROTOTYPE_HOST) {
     if (window.top === window) highlightPrototypePages()
@@ -33,8 +34,9 @@
       GM_setValue(PROTOTYPE_PAGES_KEY, {})
       return
     }
-    addProjectDeadlines(table)
-    syncTaskLinks(table, addTaskButtons(table)).catch((error) => {
+    const projectDeadlines = readProjectDeadlines()
+    addProjectDeadlines(table, projectDeadlines)
+    syncTaskLinks(table, addTaskButtons(table), projectDeadlines).catch((error) => {
       const message = document.createElement('p')
       message.textContent = '部分需求链接未同步，请刷新页面重试。'
       message.setAttribute('role', 'status')
@@ -87,7 +89,19 @@
     return button
   }
 
-  async function addProjectDeadlines(table) {
+  async function readProjectDeadlines() {
+    try {
+      const { projects } = await fetchZenTao(new URL('my-project.json', location.href))
+      return new Map(Object.values(projects).flatMap(({ id, end }) => (
+        end && end !== '0000-00-00' ? [[String(id), end]] : []
+      )))
+    } catch (error) {
+      console.error('读取禅道项目截止日期失败', error)
+      return null
+    }
+  }
+
+  async function addProjectDeadlines(table, projectDeadlines) {
     const projectHeader = table.querySelector('thead .c-project')
     if (!projectHeader) return
 
@@ -106,16 +120,13 @@
     })
     if (!rows.some(({ id }) => id)) return
 
-    try {
-      const { projects } = await fetchZenTao(new URL('my-project.json', location.href))
-      const deadlines = new Map(Object.values(projects).map(({ id, end }) => [String(id), end]))
-      for (const { id, cell } of rows) {
-        const end = deadlines.get(id)
-        if (end && end !== '0000-00-00') cell.textContent = end
-      }
-    } catch (error) {
+    const deadlines = await projectDeadlines
+    if (!deadlines) {
       header.title = '项目截止日期读取失败，请刷新页面重试。'
-      console.error('读取禅道项目截止日期失败', error)
+      return
+    }
+    for (const { id, cell } of rows) {
+      cell.textContent = deadlines.get(id) ?? '—'
     }
   }
 
@@ -139,9 +150,13 @@
     return buttons
   }
 
-  async function syncTaskLinks(table, buttons) {
-    const tasks = await readAssignedTasks(table, buttons.size)
-    const groups = Object.groupBy(tasks.filter((task) => Number(task.story) > 0), (task) => (
+  async function syncTaskLinks(table, buttons, projectDeadlines) {
+    const [tasks, deadlines] = await Promise.all([readAssignedTasks(table, buttons.size), projectDeadlines])
+    const today = PROJECT_DATE.format(Date.now())
+    const relevantTasks = tasks.filter((task) => Number(task.story) > 0 && (
+      buttons.has(String(task.id)) || (deadlines?.get(String(task.project)) ?? '') >= today
+    ))
+    const groups = Object.groupBy(relevantTasks, (task) => (
       `${task.story}/${task.storyVersion}/${task.latestStoryVersion}`
     ))
     const jobs = Object.entries(groups).map(([version, tasks]) => ({
@@ -153,6 +168,7 @@
     const pages = {}
     const applyLink = (tasks, link) => {
       if (!link) return
+      const path = prototypePagePath(new URL(link.url))
       for (const task of tasks) {
         const button = buttons.get(String(task.id))
         if (button) {
@@ -160,12 +176,14 @@
           button.target = link.target || '_blank'
           button.title = '查看需求链接'
         }
+        const end = deadlines?.get(String(task.project))
+        if (!path || !end || end < today) continue
+
+        // 同一原型可能关联多个项目，分别保留各任务状态的最晚截止日期。
+        const state = UNFINISHED.includes(task.status) ? 2 : Number(task.status === 'done')
+        const page = (pages[path] ??= {})
+        if (end > (page[state] ?? '')) page[state] = end
       }
-      const path = prototypePagePath(new URL(link.url))
-      if (!path) return
-      // 同一原型页面有多项任务时，优先显示仍需处理的任务。
-      const states = tasks.map(({ status }) => UNFINISHED.includes(status) ? 2 : Number(status === 'done'))
-      pages[path] = Math.max(pages[path] ?? 0, ...states)
     }
 
     const pending = jobs.filter(({ version, tasks }) => {
@@ -174,7 +192,7 @@
       applyLink(tasks, cached.link)
       return false
     })
-    GM_setValue(PROTOTYPE_PAGES_KEY, pages)
+    if (deadlines) GM_setValue(PROTOTYPE_PAGES_KEY, pages)
 
     let failed = false
     for (let index = 0; index < pending.length; index += 6) {
@@ -188,7 +206,7 @@
       }))
       failed ||= results.some((result) => result.status === 'rejected')
       // 提前同步当前页和首批任务，打开的原型页会随后台扫描更新。
-      if (index % 24 === 0 || index + 6 >= pending.length) GM_setValue(PROTOTYPE_PAGES_KEY, pages)
+      if (deadlines && (index % 24 === 0 || index + 6 >= pending.length)) GM_setValue(PROTOTYPE_PAGES_KEY, pages)
     }
     if (failed) throw new Error('部分任务详情读取失败')
   }
@@ -232,14 +250,13 @@
   }
 
   function highlightPrototypePages() {
-    let pages = GM_getValue(PROTOTYPE_PAGES_KEY) ?? Object.fromEntries(
-      GM_getValue('unfinishedPrototypePages', []).map((path) => [path, 2]),
-    )
+    let pages = GM_getValue(PROTOTYPE_PAGES_KEY, {})
     const url = new URL(location.href)
     const folder = normalizePath(new URL('.', url).pathname)
     if (!prototypePagePath(url) && !Object.keys(pages).some((path) => path.startsWith(folder))) return
 
     const labels = ['已关闭或取消', '已完成', '未完成']
+    const statePriority = [2, 1, 0]
     const style = document.createElement('style')
     style.textContent = `
       #sitemapTreeContainer [data-zentao-task-state] .sitemapPageName {
@@ -262,10 +279,12 @@
     document.head.append(style)
 
     const highlight = () => {
+      const today = PROJECT_DATE.format(Date.now())
       for (const link of document.querySelectorAll('#sitemapTreeContainer .sitemapPageLink[nodeurl]')) {
         const path = normalizePath(new URL(link.getAttribute('nodeurl'), location.href).pathname)
         const previous = link.dataset.zentaoTaskState
-        const state = pages[path]
+        const page = pages[path]
+        const state = page && statePriority.find((priority) => page[priority] >= today)
         if (state === undefined) {
           if (previous !== undefined) {
             delete link.dataset.zentaoTaskState
@@ -291,5 +310,15 @@
       highlight()
     })
     highlight()
+    refreshAtMidnight()
+
+    function refreshAtMidnight() {
+      const now = Date.now()
+      const midnight = Date.parse(`${PROJECT_DATE.format(now)}T00:00:00+08:00`) + 24 * 60 * 60 * 1000
+      setTimeout(() => {
+        highlight()
+        refreshAtMidnight()
+      }, midnight - now)
+    }
   }
 })()
