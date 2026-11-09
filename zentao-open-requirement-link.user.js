@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.0.1
 // @description  在需求描述标题旁添加按钮，一键打开描述中的链接
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -27,7 +27,7 @@
     button.target = link.target
     button.rel = 'noopener'
     button.className = 'btn btn-default btn-sm'
-    button.style.marginInlineStart = '8px'
+    button.style.marginInlineStart = 'auto'
     button.textContent = '打开需求链接'
 
     // 禅道可能把链接的 # 片段留在超链接后的文本里。
@@ -37,6 +37,9 @@
       if (fragment) button.hash = fragment
     }
 
+    title.style.display = 'flex'
+    title.style.alignItems = 'center'
+    title.style.columnGap = '8px'
     title.append(button)
   }
 })()
