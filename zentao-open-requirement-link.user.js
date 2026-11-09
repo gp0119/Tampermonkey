@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.5.0
+// @version      1.5.1
 // @description  在禅道任务列表查看需求链接和项目截止日期，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -183,6 +183,7 @@
       visible: tasks.some((task) => buttons.has(String(task.id))),
     })).sort((a, b) => Number(b.visible) - Number(a.visible))
 
+    const resolvedAddresses = new Map()
     const applyLink = (tasks, link) => {
       if (!link) return
       const path = prototypePagePath(new URL(link.url))
@@ -193,6 +194,7 @@
           button.href = path && end ? linkWithDeadline(link.url, end) : link.url
           button.target = link.target || '_blank'
           button.removeAttribute('title')
+          resolvedAddresses.set(button, path ? `${path}:${end ?? ''}` : normalizePath(button.href))
         }
         const pages = cohorts.get(end)
         if (!path || !pages) continue
@@ -200,6 +202,15 @@
         // 同一日期的多个任务指向同一原型时，优先标记未完成的任务。
         const state = UNFINISHED.includes(task.status) ? 2 : Number(task.status === 'done')
         pages[path] = Math.max(pages[path] ?? 0, state)
+      }
+    }
+    const mergeDuplicateButtons = () => {
+      const seen = new Set()
+      for (const button of buttons.values()) {
+        const address = resolvedAddresses.get(button)
+        if (!address) continue
+        button.style.display = seen.has(address) ? 'none' : ''
+        seen.add(address)
       }
     }
     const publish = () => {
@@ -212,6 +223,7 @@
       applyLink(tasks, cached.link)
       return false
     })
+    mergeDuplicateButtons()
     publish()
 
     let failed = false
@@ -224,6 +236,7 @@
         GM_setValue(`storyLink:${version}`, { link, savedAt: Date.now() })
         applyLink(tasks, link)
       }))
+      mergeDuplicateButtons()
       failed ||= results.some((result) => result.status === 'rejected')
       // 提前同步当前页和首批任务，打开的原型页会随后台扫描更新。
       if (index % 24 === 0 || index + 6 >= pending.length) publish()
