@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.8.2
+// @version      1.8.3
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的后端和测试指派人，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -10,10 +10,12 @@
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_listValues
+// @grant        GM_deleteValue
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.2
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.3
 
 ;(function () {
   'use strict'
@@ -229,7 +231,7 @@
     const rows = Array.from(table.querySelectorAll(`tbody ${TASK_LINK}`), (link) => {
       const row = link.closest('tr')
       const id = link.pathname.match(/\/task-view-(\d+)\.html$/)[1]
-      const project = row.querySelector('.c-project a').pathname.match(/\/project-browse-(\d+)\.html$/)[1]
+      const project = row.querySelector('.c-project a')?.pathname.match(/\/project-browse-(\d+)\.html$/)?.[1]
       const cells = roles.map(() => {
         const cell = document.createElement('td')
         cell.textContent = '—'
@@ -287,6 +289,7 @@
   }
 
   function addPrototypeLabel(button, folder) {
+    if (button.previousElementSibling?.matches('[data-prototype-label]')) button.previousElementSibling.remove()
     const segments = folder.split('/').filter(Boolean).slice(-2)
     if (!segments.length) return
 
@@ -298,6 +301,7 @@
     }
     const label = document.createElement('span')
     label.className = 'label label-light'
+    label.dataset.prototypeLabel = ''
     label.textContent = name
     label.title = name
     Object.assign(label.style, {
@@ -353,13 +357,14 @@
       for (const [date, pages] of cohorts) GM_setValue(PROTOTYPE_COHORT_KEY + date, pages)
     }
 
+    // 过期的缓存先用于显示，避免刷新期间或请求失败时清空原型页的标记。
     const pending = jobs.filter(({ version, tasks }) => {
       const cached = GM_getValue(`storyLink:${version}`)
-      if (!cached || Date.now() - cached.savedAt > 7 * 24 * 60 * 60 * 1000) return true
-      applyLink(tasks, cached.link)
-      return false
+      if (cached) applyLink(tasks, cached.link)
+      return !cached || Date.now() - cached.savedAt > 7 * 24 * 60 * 60 * 1000
     })
     publish()
+    pruneStoredValues(new Set([...jobs.map(({ version }) => `storyLink:${version}`), ...[...cohorts.keys()].map((date) => PROTOTYPE_COHORT_KEY + date)]))
 
     const concurrency = 6
     let next = 0
@@ -385,6 +390,16 @@
     }
     await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, syncPendingLinks))
     if (failed) throw new Error('部分任务详情读取失败')
+  }
+
+  function pruneStoredValues(keepKeys) {
+    const expiredAt = Date.now() - 30 * 24 * 60 * 60 * 1000
+    for (const key of GM_listValues()) {
+      if (keepKeys.has(key)) continue
+      const date = key.match(/^prototypeTask(?:Pages|Cohort):(\d{4}-\d{2}-\d{2})$/)?.[1]
+      const savedAt = date ? Date.parse(`${date}T00:00:00`) : key.startsWith('storyLink:') ? GM_getValue(key).savedAt : undefined
+      if (savedAt < expiredAt) GM_deleteValue(key)
+    }
   }
 
   async function readTasks(path) {
