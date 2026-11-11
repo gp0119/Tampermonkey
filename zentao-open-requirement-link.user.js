@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.8.3
+// @version      1.8.4
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的后端和测试指派人，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.3
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.4
 
 ;(function () {
   'use strict'
@@ -274,7 +274,10 @@
           for (const { id, cells } of rows) {
             const related = tasksByStory[tasksById.get(id)?.story] ?? []
             cells.forEach((cell, index) => {
-              const names = related.filter(roles[index].matches).map((task) => users[task.assignedTo] || task.assignedTo || '未指派')
+              const names = related.filter(roles[index].matches).map((task) => {
+                const account = task.finishedBy || task.assignedTo
+                return users[account] || account || '未指派'
+              })
               cell.textContent = [...new Set(names)].join('、') || '—'
             })
           }
