@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.7.0
-// @description  在禅道任务列表查看需求链接和项目截止日期，并在原型目录标记任务状态
-// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.7.0
+// @version      1.8.0
+// @description  在禅道任务列表查看需求链接、项目截止日期及同需求的后端和测试指派人，并在原型目录标记任务状态
+// @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @match        *://zentao.chaomeifan.com/*
 // @match        *://redmine.chaomeifan.com/*
@@ -13,6 +13,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.0
 
 ;(function () {
   'use strict'
@@ -34,6 +35,7 @@
     if (!table) return
     const projectDeadlines = readProjectDeadlines()
     addProjectDeadlines(table, projectDeadlines)
+    addTaskAssignees(table)
     const buttons = addTaskButtons(table)
     if (!buttons.size) return
     syncTaskLinks(buttons, projectDeadlines).catch((error) => {
@@ -93,9 +95,10 @@
       const deadline = (await projectDeadlines)?.get(id)
       if (deadline) {
         button.href = linkWithDeadline(link.url, deadline, prototype.part)
-        const refresh = () => syncTaskLinks(new Map(), projectDeadlines, deadline).catch((error) => {
-          console.error('加载同截止日期的禅道任务失败', error)
-        })
+        const refresh = () =>
+          syncTaskLinks(new Map(), projectDeadlines, deadline).catch((error) => {
+            console.error('加载同截止日期的禅道任务失败', error)
+          })
         if (GM_getValue(PROTOTYPE_COHORT_KEY + deadline)) {
           button.addEventListener('click', refresh, { once: true })
         } else {
@@ -112,9 +115,7 @@
   async function readProjectDeadlines() {
     try {
       const { projects } = await fetchZenTao(new URL('my-project.json', location.href))
-      return new Map(Object.values(projects).flatMap(({ id, end }) => (
-        /^\d{4}-\d{2}-\d{2}$/.test(end) && end !== '0000-00-00' ? [[String(id), end]] : []
-      )))
+      return new Map(Object.values(projects).flatMap(({ id, end }) => (/^\d{4}-\d{2}-\d{2}$/.test(end) && end !== '0000-00-00' ? [[String(id), end]] : [])))
     } catch (error) {
       console.error('读取禅道项目截止日期失败', error)
       return null
@@ -170,6 +171,63 @@
     return buttons
   }
 
+  async function addTaskAssignees(table) {
+    const assignedHeader = table.querySelector('thead a[href*="-assignedTo_"]')?.closest('th')
+    if (!assignedHeader) return
+
+    const roles = [
+      { label: '后端', matches: (task) => task.type === 'devel' && !task.name.includes('【前端】') },
+      { label: '测试', matches: (task) => task.type === 'test' },
+    ]
+    assignedHeader.after(
+      ...roles.map(({ label }) => {
+        const header = document.createElement('th')
+        header.scope = 'col'
+        header.className = 'w-100px'
+        header.textContent = label
+        return header
+      })
+    )
+
+    const rows = Array.from(table.querySelectorAll(`tbody ${TASK_LINK}`), (link) => {
+      const row = link.closest('tr')
+      const id = link.pathname.match(/\/task-view-(\d+)\.html$/)[1]
+      const project = row.querySelector('.c-project a').pathname.match(/\/project-browse-(\d+)\.html$/)[1]
+      const cells = roles.map(() => {
+        const cell = document.createElement('td')
+        cell.textContent = '…'
+        return cell
+      })
+      row.cells[assignedHeader.cellIndex].after(...cells)
+      return { id, project, cells }
+    })
+
+    await Promise.all(
+      Object.entries(Object.groupBy(rows, (row) => row.project)).map(async ([project, rows]) => {
+        try {
+          const { tasks, users } = await readTasks(`project-task-${project}-all-0-id_desc`)
+          const tasksById = new Map(tasks.map((task) => [String(task.id), task]))
+          const tasksByStory = Object.groupBy(
+            tasks.filter((task) => Number(task.story) > 0),
+            (task) => task.story
+          )
+          for (const { id, cells } of rows) {
+            const related = tasksByStory[tasksById.get(id)?.story] ?? []
+            cells.forEach((cell, index) => {
+              const names = related.filter(roles[index].matches).map((task) => users[task.assignedTo] || task.assignedTo || '未指派')
+              cell.textContent = [...new Set(names)].join('、') || '—'
+            })
+          }
+        } catch (error) {
+          for (const { cells } of rows) {
+            for (const cell of cells) cell.textContent = '读取失败'
+          }
+          console.error('读取同需求的任务指派人失败', error)
+        }
+      })
+    )
+  }
+
   function addPrototypeLabel(button, folder) {
     const segments = folder.split('/').filter(Boolean).slice(-2)
     if (!segments.length) return
@@ -196,21 +254,21 @@
   }
 
   async function syncTaskLinks(buttons, projectDeadlines, selectedDate) {
-    const [tasks, deadlines] = await Promise.all([readAssignedTasks(), projectDeadlines])
-    const visibleDates = tasks.filter((task) => buttons.has(String(task.id)))
-      .map((task) => deadlines?.get(String(task.project))).filter(Boolean)
+    const [{ tasks }, deadlines] = await Promise.all([readTasks('my-task-assignedTo-id_desc'), projectDeadlines])
+    const visibleDates = tasks
+      .filter((task) => buttons.has(String(task.id)))
+      .map((task) => deadlines?.get(String(task.project)))
+      .filter(Boolean)
     const cohorts = new Map([...new Set(selectedDate ? [selectedDate] : visibleDates)].map((date) => [date, {}]))
-    const relevantTasks = tasks.filter((task) => Number(task.story) > 0 && (
-      buttons.has(String(task.id)) || cohorts.has(deadlines?.get(String(task.project)))
-    ))
-    const groups = Object.groupBy(relevantTasks, (task) => (
-      `${task.story}/${task.storyVersion}/${task.latestStoryVersion}`
-    ))
-    const jobs = Object.entries(groups).map(([version, tasks]) => ({
-      version,
-      tasks,
-      visible: tasks.some((task) => buttons.has(String(task.id))),
-    })).sort((a, b) => Number(b.visible) - Number(a.visible))
+    const relevantTasks = tasks.filter((task) => Number(task.story) > 0 && (buttons.has(String(task.id)) || cohorts.has(deadlines?.get(String(task.project)))))
+    const groups = Object.groupBy(relevantTasks, (task) => `${task.story}/${task.storyVersion}/${task.latestStoryVersion}`)
+    const jobs = Object.entries(groups)
+      .map(([version, tasks]) => ({
+        version,
+        tasks,
+        visible: tasks.some((task) => buttons.has(String(task.id))),
+      }))
+      .sort((a, b) => Number(b.visible) - Number(a.visible))
 
     const applyLink = (tasks, link) => {
       if (!link) return
@@ -271,16 +329,16 @@
     if (failed) throw new Error('部分任务详情读取失败')
   }
 
-  async function readAssignedTasks() {
-    const first = await fetchZenTao(new URL('my-task-assignedTo-id_desc-0-2000-1.json', location.href))
+  async function readTasks(path) {
+    const first = await fetchZenTao(new URL(`${path}-0-2000-1.json`, location.href))
     const { recTotal, recPerPage, pageTotal } = first.pager
     const tasks = Object.values(first.tasks)
     for (let page = 2; page <= Number(pageTotal); page++) {
-      const href = new URL(`my-task-assignedTo-id_desc-${recTotal}-${recPerPage}-${page}.json`, location.href)
+      const href = new URL(`${path}-${recTotal}-${recPerPage}-${page}.json`, location.href)
       tasks.push(...Object.values((await fetchZenTao(href)).tasks))
     }
     if (new Set(tasks.map((task) => task.id)).size !== Number(recTotal)) throw new Error('分页中的任务数与列表总数不符')
-    return tasks
+    return { tasks, users: first.users }
   }
 
   async function fetchZenTao(href) {
@@ -335,8 +393,7 @@
     const url = new URL(location.href)
     const folder = normalizePath(new URL('.', url).pathname)
     const selectionKey = `${DEADLINE_PARAM}:${folder}`
-    const deadline = new URLSearchParams(url.hash.slice(1)).get(DEADLINE_PARAM)
-      ?? url.searchParams.get(DEADLINE_PARAM) ?? sessionStorage.getItem(selectionKey)
+    const deadline = new URLSearchParams(url.hash.slice(1)).get(DEADLINE_PARAM) ?? url.searchParams.get(DEADLINE_PARAM) ?? sessionStorage.getItem(selectionKey)
     const cohortKey = /^\d{4}-\d{2}-\d{2}$/.test(deadline) ? PROTOTYPE_COHORT_KEY + deadline : null
     let tree = document.getElementById('sitemapTreeContainer')
     if (!cohortKey && !tree && !document.getElementById('mainFrame')) return
@@ -358,7 +415,7 @@
       for (const [key, page] of Object.entries(pages)) {
         // 页名可能改过。按目录里的 ID 找到现用地址，再兼容旧缓存和无 ID 的链接。
         const legacy = typeof page === 'number'
-        const path = legacy ? key : pathsById?.get(key) ?? page.path
+        const path = legacy ? key : (pathsById?.get(key) ?? page.path)
         if (!path) continue
         const state = legacy ? page : page.state
         statesByPath.set(path, Math.max(statesByPath.get(path) ?? 0, state))
@@ -422,7 +479,9 @@
     let revealedPage
     let frame
 
-    const disableAutoWidth = () => { autoWidth = false }
+    const disableAutoWidth = () => {
+      autoWidth = false
+    }
     splitter?.addEventListener('pointerdown', disableAutoWidth, { once: true })
 
     const layout = () => {
@@ -446,7 +505,9 @@
       // 分组展开期间，当前的滚动范围可能还到不了目标行。
       if (Math.abs(tree.scrollTop - previousScroll - delta) < 1) revealedPage = page
     }
-    const scheduleLayout = () => { frame ??= requestAnimationFrame(layout) }
+    const scheduleLayout = () => {
+      frame ??= requestAnimationFrame(layout)
+    }
 
     const selectionObserver = new MutationObserver(scheduleLayout)
     selectionObserver.observe(tree, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] })
