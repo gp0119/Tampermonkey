@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.8.1
+// @version      1.8.2
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的后端和测试指派人，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -13,7 +13,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.1
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.2
 
 ;(function () {
   'use strict'
@@ -37,6 +37,7 @@
     addProjectDeadlines(table, projectDeadlines)
     addTaskAssignees(table, projectDeadlines)
     const buttons = addTaskButtons(table)
+    layoutTaskTable(table)
     if (!buttons.size) return
     syncTaskLinks(buttons, projectDeadlines).catch((error) => {
       const message = document.createElement('p')
@@ -122,6 +123,38 @@
     }
   }
 
+  function layoutTaskTable(table) {
+    const widths = {
+      id: '88px',
+      pri: '40px',
+      project: '160px',
+      name: 'auto',
+      openedBy: '72px',
+      assignedTo: '72px',
+      finishedBy: '80px',
+      estimate: '48px',
+      consumed: '48px',
+      left: '48px',
+      status: '80px',
+      截止日期: '100px',
+      后端: '72px',
+      测试: '72px',
+      操作: '176px',
+    }
+    for (const header of table.tHead.rows[0].cells) {
+      const field = header.querySelector('a[href]')?.getAttribute('href').match(/-([a-z]+)_(?:asc|desc)(?:-|\.html)/i)?.[1]
+      const width = widths[field ?? header.textContent.trim()]
+      if (width) header.style.setProperty('width', width, 'important')
+    }
+    table.style.tableLayout = 'fixed'
+    table.style.width = '100%'
+    table.style.minWidth = '1480px'
+    const container = document.createElement('div')
+    container.style.overflowX = 'auto'
+    table.before(container)
+    container.append(table)
+  }
+
   async function addProjectDeadlines(table, projectDeadlines) {
     const projectHeader = table.querySelector('thead .c-project')
     if (!projectHeader) return
@@ -162,8 +195,12 @@
       row.style.display = 'flex'
       row.style.alignItems = 'center'
       row.style.columnGap = '8px'
+      row.style.minWidth = '0'
+      taskLink.style.flex = '1 1 0%'
+      taskLink.style.minWidth = '0'
       taskLink.style.overflow = 'hidden'
       taskLink.style.textOverflow = 'ellipsis'
+      taskLink.title = taskLink.textContent.trim()
       taskLink.before(row)
       row.append(taskLink, button)
       buttons.set(id, button)
@@ -196,6 +233,8 @@
       const cells = roles.map(() => {
         const cell = document.createElement('td')
         cell.textContent = '—'
+        cell.style.whiteSpace = 'normal'
+        cell.style.overflowWrap = 'anywhere'
         return cell
       })
       row.cells[assignedHeader.cellIndex].after(...cells)
@@ -263,7 +302,7 @@
     label.title = name
     Object.assign(label.style, {
       marginInlineStart: 'auto',
-      maxWidth: '40%',
+      maxWidth: 'min(24%, 160px)',
       overflow: 'hidden',
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap',
