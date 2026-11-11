@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.8.0
+// @version      1.8.1
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的后端和测试指派人，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -13,7 +13,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.0
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.1
 
 ;(function () {
   'use strict'
@@ -35,7 +35,7 @@
     if (!table) return
     const projectDeadlines = readProjectDeadlines()
     addProjectDeadlines(table, projectDeadlines)
-    addTaskAssignees(table)
+    addTaskAssignees(table, projectDeadlines)
     const buttons = addTaskButtons(table)
     if (!buttons.size) return
     syncTaskLinks(buttons, projectDeadlines).catch((error) => {
@@ -171,7 +171,7 @@
     return buttons
   }
 
-  async function addTaskAssignees(table) {
+  async function addTaskAssignees(table, projectDeadlines) {
     const assignedHeader = table.querySelector('thead a[href*="-assignedTo_"]')?.closest('th')
     if (!assignedHeader) return
 
@@ -195,15 +195,34 @@
       const project = row.querySelector('.c-project a').pathname.match(/\/project-browse-(\d+)\.html$/)[1]
       const cells = roles.map(() => {
         const cell = document.createElement('td')
-        cell.textContent = '…'
+        cell.textContent = '—'
         return cell
       })
       row.cells[assignedHeader.cellIndex].after(...cells)
       return { id, project, cells }
     })
 
+    const deadlines = await projectDeadlines
+    if (!deadlines) {
+      for (const { cells } of rows) {
+        for (const cell of cells) {
+          cell.textContent = '读取失败'
+          cell.title = '截止日期读取失败，请刷新页面重试。'
+        }
+      }
+      return
+    }
+    const today = new Date().setHours(0, 0, 0, 0)
+    const upcomingRows = rows.filter(({ project }) => {
+      const deadline = deadlines.get(project)
+      return deadline && new Date(`${deadline}T00:00:00`).getTime() >= today
+    })
+
     await Promise.all(
-      Object.entries(Object.groupBy(rows, (row) => row.project)).map(async ([project, rows]) => {
+      Object.entries(Object.groupBy(upcomingRows, (row) => row.project)).map(async ([project, rows]) => {
+        for (const { cells } of rows) {
+          for (const cell of cells) cell.textContent = '…'
+        }
         try {
           const { tasks, users } = await readTasks(`project-task-${project}-all-0-id_desc`)
           const tasksById = new Map(tasks.map((task) => [String(task.id), task]))
@@ -332,10 +351,12 @@
   async function readTasks(path) {
     const first = await fetchZenTao(new URL(`${path}-0-2000-1.json`, location.href))
     const { recTotal, recPerPage, pageTotal } = first.pager
-    const tasks = Object.values(first.tasks)
+    // 项目列表把子任务嵌在父任务中，分页总数仍包含这些子任务。
+    const flattenTasks = (tasks) => Object.values(tasks).flatMap((task) => [task, ...flattenTasks(task.children ?? {})])
+    const tasks = flattenTasks(first.tasks)
     for (let page = 2; page <= Number(pageTotal); page++) {
       const href = new URL(`${path}-${recTotal}-${recPerPage}-${page}.json`, location.href)
-      tasks.push(...Object.values((await fetchZenTao(href)).tasks))
+      tasks.push(...flattenTasks((await fetchZenTao(href)).tasks))
     }
     if (new Set(tasks.map((task) => task.id)).size !== Number(recTotal)) throw new Error('分页中的任务数与列表总数不符')
     return { tasks, users: first.users }
