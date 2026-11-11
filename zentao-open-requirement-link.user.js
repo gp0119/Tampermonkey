@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.8.4
-// @description  在禅道任务列表查看需求链接、项目截止日期及同需求的后端和测试指派人，并在原型目录标记任务状态
+// @version      1.8.7
+// @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @match        *://zentao.chaomeifan.com/*
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.4
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.7
 
 ;(function () {
   'use strict'
@@ -37,16 +37,19 @@
     if (!table) return
     const projectDeadlines = readProjectDeadlines()
     addProjectDeadlines(table, projectDeadlines)
-    addTaskAssignees(table, projectDeadlines)
     const buttons = addTaskButtons(table)
     layoutTaskTable(table)
     if (!buttons.size) return
-    syncTaskLinks(buttons, projectDeadlines).catch((error) => {
+    const assignedTasks = readTasks('my-task-assignedTo-id_desc')
+    Promise.all([
+      addTaskAssignees(table, buttons, projectDeadlines, assignedTasks),
+      syncTaskLinks(buttons, projectDeadlines, undefined, assignedTasks),
+    ]).catch((error) => {
       const message = document.createElement('p')
-      message.textContent = '部分需求链接未同步，请刷新页面重试。'
+      message.textContent = '部分需求信息未同步，请刷新页面重试。'
       message.setAttribute('role', 'status')
       table.before(message)
-      console.error('加载禅道需求链接失败', error)
+      console.error('加载禅道需求信息失败', error)
     })
   } else {
     for (const title of document.querySelectorAll(DETAIL_TITLE)) {
@@ -126,6 +129,16 @@
   }
 
   function layoutTaskTable(table) {
+    const style = document.createElement('style')
+    style.textContent = `
+      #tasktable tbody tr[data-zentao-unfinished]:not(:has(input[type="checkbox"]:checked)) > td {
+        background-color: #fff8e6;
+      }
+      #tasktable tbody tr[data-zentao-unfinished]:not(:has(input[type="checkbox"]:checked)):hover > td {
+        background-color: #fff0c2;
+      }
+    `
+    document.head.append(style)
     const widths = {
       id: '88px',
       pri: '40px',
@@ -210,27 +223,32 @@
     return buttons
   }
 
-  async function addTaskAssignees(table, projectDeadlines) {
+  async function addTaskAssignees(table, buttons, projectDeadlines, assignedTasks) {
     const assignedHeader = table.querySelector('thead a[href*="-assignedTo_"]')?.closest('th')
     if (!assignedHeader) return
 
+    const { tasks: assigned } = await assignedTasks
+    const visibleTasks = assigned.filter((task) => buttons.has(String(task.id)))
+    const assignedById = new Map(visibleTasks.map((task) => [String(task.id), task]))
     const roles = [
+      { label: '前端', matches: (task) => task.type === 'devel' && task.name.includes('【前端】') },
       { label: '后端', matches: (task) => task.type === 'devel' && !task.name.includes('【前端】') },
       { label: '测试', matches: (task) => task.type === 'test' },
-    ]
+    ].filter(({ matches }) => visibleTasks.some((task) => !matches(task)))
     assignedHeader.after(
       ...roles.map(({ label }) => {
         const header = document.createElement('th')
         header.scope = 'col'
-        header.className = 'w-100px'
+        header.style.width = '72px'
         header.textContent = label
         return header
       })
     )
 
-    const rows = Array.from(table.querySelectorAll(`tbody ${TASK_LINK}`), (link) => {
-      const row = link.closest('tr')
-      const id = link.pathname.match(/\/task-view-(\d+)\.html$/)[1]
+    const rows = Array.from(buttons, ([id, button]) => {
+      const row = button.closest('tr')
+      const task = assignedById.get(id)
+      row.toggleAttribute('data-zentao-unfinished', UNFINISHED.includes(task?.status))
       const project = row.querySelector('.c-project a')?.pathname.match(/\/project-browse-(\d+)\.html$/)?.[1]
       const cells = roles.map(() => {
         const cell = document.createElement('td')
@@ -240,7 +258,7 @@
         return cell
       })
       row.cells[assignedHeader.cellIndex].after(...cells)
-      return { id, project, cells }
+      return { task, project, cells }
     })
 
     const deadlines = await projectDeadlines
@@ -265,15 +283,18 @@
           for (const cell of cells) cell.textContent = '…'
         }
         try {
-          const { tasks, users } = await readTasks(`project-task-${project}-all-0-id_desc`)
-          const tasksById = new Map(tasks.map((task) => [String(task.id), task]))
+          const { tasks, users } = await readRelatedTasks(project, rows, assigned)
           const tasksByStory = Object.groupBy(
             tasks.filter((task) => Number(task.story) > 0),
             (task) => task.story
           )
-          for (const { id, cells } of rows) {
-            const related = tasksByStory[tasksById.get(id)?.story] ?? []
+          for (const { task, cells } of rows) {
+            const related = tasksByStory[task?.story] ?? []
             cells.forEach((cell, index) => {
+              if (task && roles[index].matches(task)) {
+                cell.textContent = '—'
+                return
+              }
               const names = related.filter(roles[index].matches).map((task) => {
                 const account = task.finishedBy || task.assignedTo
                 return users[account] || account || '未指派'
@@ -289,6 +310,30 @@
         }
       })
     )
+  }
+
+  async function readRelatedTasks(project, rows, assigned) {
+    const stories = [...new Set(rows.map(({ task }) => task?.story).filter((story) => Number(story) > 0))]
+    const tasksById = new Map(assigned.map((task) => [String(task.id), task]))
+    const relatedIds = new Set()
+    const users = {}
+    let next = 0
+    const readStories = async () => {
+      while (next < stories.length) {
+        // 项目任务列表即使返回 JSON，也会覆盖禅道批量编辑使用的返回地址。
+        const data = await fetchZenTao(new URL(`story-view-${stories[next++]}.json`, location.href))
+        Object.assign(users, data.users)
+        const ids = flattenTasks(data.story.tasks[project] ?? {}).map((task) => String(task.id)).sort((a, b) => Number(a) - Number(b))
+        for (const id of ids) {
+          relatedIds.add(id)
+          if (tasksById.has(id)) continue
+          const { task } = await fetchZenTao(new URL(`task-view-${id}.json`, location.href))
+          for (const loaded of flattenTasks([task])) tasksById.set(String(loaded.id), loaded)
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(6, stories.length) }, readStories))
+    return { tasks: [...relatedIds].map((id) => tasksById.get(id)), users }
   }
 
   function addPrototypeLabel(button, folder) {
@@ -318,8 +363,8 @@
     button.before(label)
   }
 
-  async function syncTaskLinks(buttons, projectDeadlines, selectedDate) {
-    const [{ tasks }, deadlines] = await Promise.all([readTasks('my-task-assignedTo-id_desc'), projectDeadlines])
+  async function syncTaskLinks(buttons, projectDeadlines, selectedDate, assignedTasks = readTasks('my-task-assignedTo-id_desc')) {
+    const [{ tasks }, deadlines] = await Promise.all([assignedTasks, projectDeadlines])
     const visibleDates = tasks
       .filter((task) => buttons.has(String(task.id)))
       .map((task) => deadlines?.get(String(task.project)))
@@ -408,8 +453,6 @@
   async function readTasks(path) {
     const first = await fetchZenTao(new URL(`${path}-0-2000-1.json`, location.href))
     const { recTotal, recPerPage, pageTotal } = first.pager
-    // 项目列表把子任务嵌在父任务中，分页总数仍包含这些子任务。
-    const flattenTasks = (tasks) => Object.values(tasks).flatMap((task) => [task, ...flattenTasks(task.children ?? {})])
     const tasks = flattenTasks(first.tasks)
     for (let page = 2; page <= Number(pageTotal); page++) {
       const href = new URL(`${path}-${recTotal}-${recPerPage}-${page}.json`, location.href)
@@ -417,6 +460,10 @@
     }
     if (new Set(tasks.map((task) => task.id)).size !== Number(recTotal)) throw new Error('分页中的任务数与列表总数不符')
     return { tasks, users: first.users }
+  }
+
+  function flattenTasks(tasks) {
+    return Object.values(tasks).flatMap((task) => [task, ...flattenTasks(task.children ?? {})])
   }
 
   async function fetchZenTao(href) {
