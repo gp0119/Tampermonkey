@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.9.4
+// @version      1.9.5
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.4
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.5
 
 ;(function () {
   'use strict'
@@ -26,6 +26,9 @@
   const DETAIL_TITLE = '.detail > .detail-title'
   const TASK_LINK = '.c-name a[href*="/task-view-"]'
   const UNFINISHED = ['wait', 'doing', 'pause']
+  const zenTaoRequests = new Map()
+  const zenTaoRequestQueue = []
+  let activeZenTaoRequests = 0
 
   if (location.hostname === PROTOTYPE_HOST) {
     if (window.top === window) enhancePrototypePages()
@@ -353,8 +356,8 @@
       { role: '测试', departments: [2] },
     ]
     const members = await Promise.all(groups.flatMap(({ role, departments }) => departments.map(async (id) => {
-      const response = await requestZenTao(new URL(`dept-ajaxGetUsers-${id}.html`, location.href))
-      const doc = new DOMParser().parseFromString(await response.text(), 'text/html')
+      const html = await requestZenTao(new URL(`dept-ajaxGetUsers-${id}.html`, location.href))
+      const doc = new DOMParser().parseFromString(html, 'text/html')
       const select = doc.querySelector('select[name="user"]')
       if (!select) throw new Error('组织分组读取失败，请确认登录状态和组织权限')
       return Array.from(select.options).filter((option) => option.value).map((option) => [option.value, role])
@@ -395,8 +398,10 @@
     return { tasks: [...relatedIds].map((id) => tasksById.get(id)), users }
   }
 
-  function addPrototypeLabel(button, folder) {
+  function setPrototypeLabel(button, folder) {
     if (button.previousElementSibling?.matches('[data-prototype-label]')) button.previousElementSibling.remove()
+    button.style.marginInlineStart = 'auto'
+    if (!folder) return
     const segments = folder.split('/').filter(Boolean).slice(-2)
     if (!segments.length) return
 
@@ -428,8 +433,8 @@
       .filter((task) => buttons.has(String(task.id)))
       .map((task) => deadlines?.get(String(task.project)))
       .filter(Boolean)
-    const cohorts = new Map([...new Set(selectedDate ? [selectedDate] : visibleDates)].map((date) => [date, {}]))
-    const relevantTasks = tasks.filter((task) => Number(task.story) > 0 && (buttons.has(String(task.id)) || cohorts.has(deadlines?.get(String(task.project)))))
+    const dates = new Set(selectedDate ? [selectedDate] : visibleDates)
+    const relevantTasks = tasks.filter((task) => Number(task.story) > 0 && (buttons.has(String(task.id)) || dates.has(deadlines?.get(String(task.project)))))
     const groups = Object.groupBy(relevantTasks, (task) => `${task.story}/${task.storyVersion}/${task.latestStoryVersion}`)
     const jobs = Object.entries(groups)
       .map(([version, tasks]) => ({
@@ -440,38 +445,51 @@
       .sort((a, b) => Number(b.visible) - Number(a.visible))
 
     const applyLink = (tasks, link) => {
-      if (!link) return
-      const prototype = prototypePageReference(new URL(link.url))
+      const prototype = link && prototypePageReference(new URL(link.url))
       for (const task of tasks) {
         const end = deadlines?.get(String(task.project))
         const button = buttons.get(String(task.id))
-        if (button) {
-          button.href = prototype && end ? linkWithDeadline(link.url, end, prototype.part) : link.url
-          button.target = link.target || '_blank'
-          button.removeAttribute('title')
-          if (prototype) addPrototypeLabel(button, prototype.folder)
-        }
-        const pages = cohorts.get(end)
-        if (!prototype || !pages) continue
-
-        // 同一日期的多个任务指向同一原型时，优先标记未完成的任务。
-        const { key, path } = prototype
-        const state = UNFINISHED.includes(task.status) ? 2 : Number(task.status === 'done')
-        pages[key] = { path, state: Math.max(pages[key]?.state ?? 0, state) }
+        if (!button) continue
+        button.href = link?.url ?? new URL(`task-view-${task.id}.html`, location.href).href
+        if (prototype && end) button.href = linkWithDeadline(link.url, end, prototype.part)
+        button.target = link?.target || '_blank'
+        if (link) button.removeAttribute('title')
+        else button.title = '查看任务详情'
+        setPrototypeLabel(button, prototype?.folder)
       }
     }
     const publish = () => {
+      const cohorts = new Map([...dates].map((date) => [date, {}]))
+      for (const { tasks, link } of jobs) {
+        const prototype = link && prototypePageReference(new URL(link.url))
+        for (const task of tasks) {
+          const end = deadlines?.get(String(task.project))
+          // 未收齐链接的日期保留上次完整快照，避免请求失败清空已有标记。
+          if (link === undefined) {
+            cohorts.delete(end)
+            continue
+          }
+          const pages = cohorts.get(end)
+          if (!prototype || !pages) continue
+
+          // 每次从需求的最新结果重算，移除旧链接后仍保留其他任务的标记。
+          const { key, path } = prototype
+          const state = UNFINISHED.includes(task.status) ? 2 : Number(task.status === 'done')
+          pages[key] = { path, state: Math.max(pages[key]?.state ?? 0, state) }
+        }
+      }
       for (const [date, pages] of cohorts) GM_setValue(PROTOTYPE_COHORT_KEY + date, pages)
     }
 
     // 过期的缓存先用于显示，避免刷新期间或请求失败时清空原型页的标记。
-    const pending = jobs.filter(({ version, tasks }) => {
-      const cached = GM_getValue(`storyLink:${version}`)
-      if (cached) applyLink(tasks, cached.link)
+    const pending = jobs.filter((job) => {
+      const cached = GM_getValue(`storyLink:${job.version}`)
+      job.link = cached?.link
+      if (cached) applyLink(job.tasks, job.link)
       return !cached || Date.now() - cached.savedAt > 7 * 24 * 60 * 60 * 1000
     })
     publish()
-    pruneStoredValues(new Set([...jobs.map(({ version }) => `storyLink:${version}`), ...[...cohorts.keys()].map((date) => PROTOTYPE_COHORT_KEY + date)]))
+    pruneStoredValues(new Set([...jobs.map(({ version }) => `storyLink:${version}`), ...[...dates].map((date) => PROTOTYPE_COHORT_KEY + date)]))
 
     const concurrency = 6
     let next = 0
@@ -479,14 +497,15 @@
     let failed = false
     const syncPendingLinks = async () => {
       while (next < pending.length) {
-        const { version, tasks } = pending[next++]
+        const job = pending[next++]
+        const { version, tasks } = job
         try {
           const href = new URL(`task-view-${tasks[0].id}.json`, location.href)
           const { task } = await fetchZenTao(href)
           const doc = new DOMParser().parseFromString(task.storySpec ?? '', 'text/html')
-          const link = parseRequirementLink(doc, href) ?? null
-          GM_setValue(`storyLink:${version}`, { link, savedAt: Date.now() })
-          applyLink(tasks, link)
+          job.link = parseRequirementLink(doc, href) ?? null
+          GM_setValue(`storyLink:${version}`, { link: job.link, savedAt: Date.now() })
+          applyLink(tasks, job.link)
         } catch {
           failed = true
         }
@@ -525,15 +544,33 @@
     return Object.values(tasks).flatMap((task) => [task, ...flattenTasks(task.children ?? {})])
   }
 
-  async function requestZenTao(href) {
-    const response = await fetch(href, { redirect: 'error', signal: AbortSignal.timeout(15000) })
-    if (!response.ok) throw new Error(`禅道返回 HTTP ${response.status}`)
-    return response
+  function requestZenTao(href) {
+    const key = href.href
+    if (zenTaoRequests.has(key)) return zenTaoRequests.get(key)
+
+    const request = (async () => {
+      if (activeZenTaoRequests < 6) activeZenTaoRequests++
+      else await new Promise((resolve) => zenTaoRequestQueue.push(resolve))
+      try {
+        const response = await fetch(href, { redirect: 'error', signal: AbortSignal.timeout(15000) })
+        if (!response.ok) throw new Error(`禅道返回 HTTP ${response.status}`)
+        return await response.text()
+      } catch (error) {
+        zenTaoRequests.delete(key)
+        throw error
+      } finally {
+        // 排队请求直接接手当前槽位，避免被新请求抢占。
+        const next = zenTaoRequestQueue.shift()
+        if (next) next()
+        else activeZenTaoRequests--
+      }
+    })()
+    zenTaoRequests.set(key, request)
+    return request
   }
 
   async function fetchZenTao(href) {
-    const response = await requestZenTao(href)
-    const result = await response.json()
+    const result = JSON.parse(await requestZenTao(href))
     if (result.status !== 'success') throw new Error('禅道接口请求失败')
     return JSON.parse(result.data)
   }
@@ -655,7 +692,7 @@
     }).observe(document.body, { childList: true, subtree: true })
     if (!cohortKey) return
     GM_addValueChangeListener(cohortKey, (_key, _oldPages, newPages) => {
-      pages = newPages
+      pages = newPages ?? {}
       scheduleHighlight()
     })
     highlight()
