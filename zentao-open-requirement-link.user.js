@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.9.1
+// @version      1.9.2
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.1
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.2
 
 ;(function () {
   'use strict'
@@ -319,6 +319,8 @@
   }
 
   async function readOrganizationRoles() {
+    const cached = GM_getValue('organizationRoles')
+    if (cached && Date.now() - cached.savedAt < 7 * 24 * 60 * 60 * 1000) return new Map(cached.roles)
     const groups = [
       { role: '前端', departments: [13, 14] }, // 前端组、APP组
       { role: '后端', departments: [8, 9, 10, 11, 12] }, // 开发一至五组
@@ -331,7 +333,9 @@
       if (!select) throw new Error('组织分组读取失败，请确认登录状态和组织权限')
       return Array.from(select.options).filter((option) => option.value).map((option) => [option.value, role])
     })))
-    return new Map(members.flat())
+    const roles = members.flat()
+    GM_setValue('organizationRoles', { roles, savedAt: Date.now() })
+    return new Map(roles)
   }
 
   function getTaskRole(task, organizationRoles) {
