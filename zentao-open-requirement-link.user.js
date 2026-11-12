@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.9.5
+// @version      1.9.6
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.5
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.6
 
 ;(function () {
   'use strict'
@@ -26,7 +26,7 @@
   const DETAIL_TITLE = '.detail > .detail-title'
   const TASK_LINK = '.c-name a[href*="/task-view-"]'
   const UNFINISHED = ['wait', 'doing', 'pause']
-  const zenTaoRequests = new Map()
+  const pendingZenTaoRequests = new Map()
   const zenTaoRequestQueue = []
   let activeZenTaoRequests = 0
 
@@ -96,14 +96,24 @@
 
   async function addDetailButton(title, link) {
     const button = createLinkButton(link.url, link.target)
+    title.style.display = 'flex'
+    title.style.alignItems = 'center'
+    title.style.columnGap = '8px'
+    title.append(button)
     const project = document.querySelector('.breadcrumb a[href*="/project-browse-"]')
     const id = project?.pathname.match(/\/project-browse-(\d+)\.html$/)?.[1]
     const prototype = prototypePageReference(new URL(link.url))
     if (id && prototype) {
+      // 截止日期就绪前不可点击，否则原型页拿不到日期参数，打开后也无法再补上。
+      button.removeAttribute('href')
+      button.classList.add('disabled')
+      button.setAttribute('aria-disabled', 'true')
       const projectDeadlines = readProjectDeadlines()
       const deadline = (await projectDeadlines)?.get(id)
+      button.href = deadline ? linkWithDeadline(link.url, deadline, prototype.part) : link.url
+      button.classList.remove('disabled')
+      button.removeAttribute('aria-disabled')
       if (deadline) {
-        button.href = linkWithDeadline(link.url, deadline, prototype.part)
         const refresh = () =>
           syncTaskLinks(new Map(), projectDeadlines, deadline).catch((error) => {
             console.error('加载同截止日期的禅道任务失败', error)
@@ -115,10 +125,6 @@
         }
       }
     }
-    title.style.display = 'flex'
-    title.style.alignItems = 'center'
-    title.style.columnGap = '8px'
-    title.append(button)
   }
 
   async function readProjectDeadlines() {
@@ -212,7 +218,8 @@
   function addTaskButtons(table) {
     const buttons = new Map()
     for (const taskLink of table.querySelectorAll(`tbody ${TASK_LINK}`)) {
-      const [, id] = taskLink.pathname.match(/\/task-view-(\d+)\.html$/)
+      const id = taskLink.pathname.match(/\/task-view-(\d+)\.html$/)?.[1]
+      if (!id) continue
       const cell = taskLink.closest('.c-name')
       const button = createLinkButton(taskLink.href, '_blank')
       button.title = '查看任务详情'
@@ -238,7 +245,7 @@
     const assignedHeader = table.querySelector('thead a[href*="-assignedTo_"]')?.closest('th')
     if (!assignedHeader) return
 
-    const layoutKey = 'assigneeColumns:' + document.querySelector('#userNav .user-name').textContent.trim()
+    const layoutKey = 'assigneeColumns:' + (document.querySelector('#userNav .user-name')?.textContent.trim() ?? '')
     const headers = []
     const rows = Array.from(buttons, ([id, button]) => {
       const element = button.closest('tr')
@@ -383,12 +390,20 @@
     const readStories = async () => {
       while (next < stories.length) {
         // 项目任务列表即使返回 JSON，也会覆盖禅道批量编辑使用的返回地址。
-        const data = await fetchZenTao(new URL(`story-view-${stories[next++]}.json`, location.href))
+        const story = stories[next++]
+        const data = await fetchZenTao(new URL(`story-view-${story}.json`, location.href))
         Object.assign(users, data.users)
-        const ids = flattenTasks(data.story.tasks[project] ?? {}).map((task) => String(task.id)).sort((a, b) => Number(a) - Number(b))
-        for (const id of ids) {
+        const storyTasks = flattenTasks(data.story.tasks[project] ?? {}).sort((a, b) => Number(a.id) - Number(b.id))
+        for (const storyTask of storyTasks) {
+          if (storyTask.status === 'cancel') continue
+          const id = String(storyTask.id)
           relatedIds.add(id)
           if (tasksById.has(id)) continue
+          // 需求详情里的任务缺少 finishedBy 和 type，只有已指派的未完成任务不需要再查详情。
+          if (storyTask.assignedTo && UNFINISHED.includes(storyTask.status)) {
+            tasksById.set(id, { ...storyTask, story })
+            continue
+          }
           const { task } = await fetchZenTao(new URL(`task-view-${id}.json`, location.href))
           for (const loaded of flattenTasks([task])) tasksById.set(String(loaded.id), loaded)
         }
@@ -511,7 +526,7 @@
         }
         completed++
         // 每完成一批就同步，已打开的原型页可以逐步更新。
-        if (completed % 24 === concurrency || completed === pending.length) publish()
+        if (completed % 24 === 0 || completed === pending.length) publish()
       }
     }
     await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, syncPendingLinks))
@@ -545,28 +560,29 @@
   }
 
   function requestZenTao(href) {
+    // 只合并进行中的相同请求，完成后移除，后续调用仍拿到最新数据。
     const key = href.href
-    if (zenTaoRequests.has(key)) return zenTaoRequests.get(key)
-
-    const request = (async () => {
-      if (activeZenTaoRequests < 6) activeZenTaoRequests++
-      else await new Promise((resolve) => zenTaoRequestQueue.push(resolve))
-      try {
-        const response = await fetch(href, { redirect: 'error', signal: AbortSignal.timeout(15000) })
-        if (!response.ok) throw new Error(`禅道返回 HTTP ${response.status}`)
-        return await response.text()
-      } catch (error) {
-        zenTaoRequests.delete(key)
-        throw error
-      } finally {
-        // 排队请求直接接手当前槽位，避免被新请求抢占。
-        const next = zenTaoRequestQueue.shift()
-        if (next) next()
-        else activeZenTaoRequests--
-      }
-    })()
-    zenTaoRequests.set(key, request)
+    let request = pendingZenTaoRequests.get(key)
+    if (!request) {
+      request = sendZenTaoRequest(href).finally(() => pendingZenTaoRequests.delete(key))
+      pendingZenTaoRequests.set(key, request)
+    }
     return request
+  }
+
+  async function sendZenTaoRequest(href) {
+    if (activeZenTaoRequests < 6) activeZenTaoRequests++
+    else await new Promise((resolve) => zenTaoRequestQueue.push(resolve))
+    try {
+      const response = await fetch(href, { redirect: 'error', signal: AbortSignal.timeout(15000) })
+      if (!response.ok) throw new Error(`禅道返回 HTTP ${response.status}`)
+      return await response.text()
+    } finally {
+      // 排队请求直接接手当前槽位，避免被新请求抢占。
+      const next = zenTaoRequestQueue.shift()
+      if (next) next()
+      else activeZenTaoRequests--
+    }
   }
 
   async function fetchZenTao(href) {
