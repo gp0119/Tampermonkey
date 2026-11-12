@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.8.9
+// @version      1.9.0
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.9
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.0
 
 ;(function () {
   'use strict'
@@ -231,14 +231,19 @@
     const assignedHeader = table.querySelector('thead a[href*="-assignedTo_"]')?.closest('th')
     if (!assignedHeader) return
 
-    const { tasks: assigned } = await assignedTasks
+    const [{ tasks: assigned }, deadlines] = await Promise.all([assignedTasks, projectDeadlines])
     const visibleTasks = assigned.filter((task) => buttons.has(String(task.id)))
     const assignedById = new Map(visibleTasks.map((task) => [String(task.id), task]))
-    const roles = [
-      { label: '前端', matches: (task) => task.type === 'devel' && task.name.includes('【前端】') },
-      { label: '后端', matches: (task) => task.type === 'devel' && !task.name.includes('【前端】') },
-      { label: '测试', matches: (task) => task.type === 'test' },
-    ].filter(({ matches }) => visibleTasks.some((task) => !matches(task)))
+    for (const task of visibleTasks) {
+      buttons.get(String(task.id)).closest('tr').toggleAttribute('data-zentao-unfinished', UNFINISHED.includes(task.status))
+    }
+    const organizationRoles = await readOrganizationRoles()
+    // 「指派给我」接口返回的任务均指派给当前登录人。
+    const currentRole = organizationRoles.get(assigned[0]?.assignedTo)
+    const roles = ['前端', '后端', '测试'].filter((label) => label !== currentRole).map((label) => ({
+      label,
+      matches: (task) => getTaskRole(task, organizationRoles) === label,
+    }))
     assignedHeader.after(
       ...roles.map(({ label }) => {
         const header = document.createElement('th')
@@ -251,8 +256,6 @@
 
     const rows = Array.from(buttons, ([id, button]) => {
       const row = button.closest('tr')
-      const task = assignedById.get(id)
-      row.toggleAttribute('data-zentao-unfinished', UNFINISHED.includes(task?.status))
       const project = row.querySelector('.c-project a')?.pathname.match(/\/project-browse-(\d+)\.html$/)?.[1]
       const cells = roles.map(() => {
         const cell = document.createElement('td')
@@ -262,10 +265,9 @@
         return cell
       })
       row.cells[assignedHeader.cellIndex].after(...cells)
-      return { task, project, cells }
+      return { task: assignedById.get(id), project, cells }
     })
 
-    const deadlines = await projectDeadlines
     if (!deadlines) {
       for (const { cells } of rows) {
         for (const cell of cells) {
@@ -295,10 +297,6 @@
           for (const { task, cells } of rows) {
             const related = tasksByStory[task?.story] ?? []
             cells.forEach((cell, index) => {
-              if (task && roles[index].matches(task)) {
-                cell.textContent = '—'
-                return
-              }
               const names = related.filter(roles[index].matches).map((task) => {
                 const account = task.finishedBy || task.assignedTo
                 return users[account] || account || '未指派'
@@ -314,6 +312,29 @@
         }
       })
     )
+  }
+
+  async function readOrganizationRoles() {
+    const groups = [
+      { role: '前端', departments: [13, 14] }, // 前端组、APP组
+      { role: '后端', departments: [8, 9, 10, 11, 12] }, // 开发一至五组
+      { role: '测试', departments: [2] },
+    ]
+    const members = await Promise.all(groups.flatMap(({ role, departments }) => departments.map(async (id) => {
+      const response = await requestZenTao(new URL(`dept-ajaxGetUsers-${id}.html`, location.href))
+      const doc = new DOMParser().parseFromString(await response.text(), 'text/html')
+      const select = doc.querySelector('select[name="user"]')
+      if (!select) throw new Error('组织分组读取失败，请确认登录状态和组织权限')
+      return Array.from(select.options).filter((option) => option.value).map((option) => [option.value, role])
+    })))
+    return new Map(members.flat())
+  }
+
+  function getTaskRole(task, organizationRoles) {
+    const account = task.finishedBy || task.assignedTo
+    if (account) return organizationRoles.get(account)
+    if (task.type === 'test') return '测试'
+    if (task.type === 'devel') return task.name.includes('【前端】') ? '前端' : '后端'
   }
 
   async function readRelatedTasks(project, rows, assigned) {
@@ -470,9 +491,14 @@
     return Object.values(tasks).flatMap((task) => [task, ...flattenTasks(task.children ?? {})])
   }
 
-  async function fetchZenTao(href) {
+  async function requestZenTao(href) {
     const response = await fetch(href, { redirect: 'error', signal: AbortSignal.timeout(15000) })
     if (!response.ok) throw new Error(`禅道返回 HTTP ${response.status}`)
+    return response
+  }
+
+  async function fetchZenTao(href) {
+    const response = await requestZenTao(href)
     const result = await response.json()
     if (result.status !== 'success') throw new Error('禅道接口请求失败')
     return JSON.parse(result.data)
