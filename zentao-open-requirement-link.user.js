@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.9.2
+// @version      1.9.3
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.2
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.3
 
 ;(function () {
   'use strict'
@@ -235,11 +235,46 @@
     const assignedHeader = table.querySelector('thead a[href*="-assignedTo_"]')?.closest('th')
     if (!assignedHeader) return
 
+    const layoutKey = 'assigneeColumns:' + document.querySelector('#userNav .user-name').textContent.trim()
+    const headers = []
+    const rows = Array.from(buttons, ([id, button]) => {
+      const element = button.closest('tr')
+      const project = element.querySelector('.c-project a')?.pathname.match(/\/project-browse-(\d+)\.html$/)?.[1]
+      return { id, element, project, assignedCell: element.cells[assignedHeader.cellIndex], cells: [] }
+    })
+    const setColumns = (labels) => {
+      for (const header of headers.splice(labels.length)) header.remove()
+      for (const { cells } of rows) {
+        for (const cell of cells.splice(labels.length)) cell.remove()
+      }
+      labels.forEach((label, index) => {
+        if (!headers[index]) {
+          const header = document.createElement('th')
+          header.scope = 'col'
+          header.style.width = '72px'
+          ;(headers[index - 1] ?? assignedHeader).after(header)
+          headers.push(header)
+          for (const { assignedCell, cells } of rows) {
+            const cell = document.createElement('td')
+            cell.textContent = '—'
+            cell.style.whiteSpace = 'normal'
+            cell.style.overflowWrap = 'anywhere'
+            ;(cells[index - 1] ?? assignedCell).after(cell)
+            cells.push(cell)
+          }
+        }
+        headers[index].textContent = label
+      })
+    }
+    // 沿用当前用户上次的列布局，首次使用先预留两列，避免等待接口时挤动表格。
+    setColumns(GM_getValue(layoutKey, ['', '']))
+
     const [{ tasks: assigned }, deadlines] = await Promise.all([assignedTasks, projectDeadlines])
     const visibleTasks = assigned.filter((task) => buttons.has(String(task.id)))
     const assignedById = new Map(visibleTasks.map((task) => [String(task.id), task]))
-    for (const task of visibleTasks) {
-      buttons.get(String(task.id)).closest('tr').toggleAttribute('data-zentao-unfinished', UNFINISHED.includes(task.status))
+    for (const row of rows) {
+      row.task = assignedById.get(row.id)
+      row.element.toggleAttribute('data-zentao-unfinished', UNFINISHED.includes(row.task?.status))
     }
     const organizationRoles = await readOrganizationRoles()
     // 「指派给我」接口返回的任务均指派给当前登录人。
@@ -248,29 +283,9 @@
       label,
       matches: (task) => getTaskRole(task, organizationRoles) === label,
     }))
-    assignedHeader.after(
-      ...roles.map(({ label }) => {
-        const header = document.createElement('th')
-        header.scope = 'col'
-        header.style.width = '72px'
-        header.textContent = label
-        return header
-      })
-    )
-
-    const rows = Array.from(buttons, ([id, button]) => {
-      const row = button.closest('tr')
-      const project = row.querySelector('.c-project a')?.pathname.match(/\/project-browse-(\d+)\.html$/)?.[1]
-      const cells = roles.map(() => {
-        const cell = document.createElement('td')
-        cell.textContent = '—'
-        cell.style.whiteSpace = 'normal'
-        cell.style.overflowWrap = 'anywhere'
-        return cell
-      })
-      row.cells[assignedHeader.cellIndex].after(...cells)
-      return { task: assignedById.get(id), project, cells }
-    })
+    const labels = roles.map(({ label }) => label)
+    setColumns(labels)
+    GM_setValue(layoutKey, labels)
 
     if (!deadlines) {
       for (const { cells } of rows) {
