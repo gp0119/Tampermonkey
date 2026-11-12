@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.9.3
+// @version      1.9.4
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.3
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.4
 
 ;(function () {
   'use strict'
@@ -301,9 +301,17 @@
       const deadline = deadlines.get(project)
       return deadline && new Date(`${deadline}T00:00:00`).getTime() >= today
     })
+    const pendingRows = upcomingRows.filter((row) => {
+      row.cacheKey = Number(row.task?.story) > 0 ? `storyAssignees:${row.project}/${row.task.story}/${labels.join('/')}` : null
+      if (!row.cacheKey) return true
+      const cached = GM_getValue(row.cacheKey)
+      if (!cached || Date.now() - cached.savedAt >= 24 * 60 * 60 * 1000) return true
+      row.cells.forEach((cell, index) => { cell.textContent = cached.names[index] })
+      return false
+    })
 
     await Promise.all(
-      Object.entries(Object.groupBy(upcomingRows, (row) => row.project)).map(async ([project, rows]) => {
+      Object.entries(Object.groupBy(pendingRows, (row) => row.project)).map(async ([project, rows]) => {
         for (const { cells } of rows) {
           for (const cell of cells) cell.textContent = '…'
         }
@@ -313,15 +321,18 @@
             tasks.filter((task) => Number(task.story) > 0),
             (task) => task.story
           )
-          for (const { task, cells } of rows) {
+          for (const { task, cells, cacheKey } of rows) {
             const related = tasksByStory[task?.story] ?? []
-            cells.forEach((cell, index) => {
-              const names = related.filter(roles[index].matches).map((task) => {
-                const account = task.finishedBy || task.assignedTo
-                return users[account] || account || '未指派'
-              })
-              cell.textContent = [...new Set(names)].join('、') || '—'
-            })
+            const assignees = roles.map(({ matches }) => related.filter(matches).map((task) => {
+              const account = task.finishedBy || task.assignedTo
+              return account ? users[account] || account : null
+            }))
+            const names = assignees.map((group) => [...new Set(group.map((name) => name || '未指派'))].join('、') || '—')
+            cells.forEach((cell, index) => { cell.textContent = names[index] })
+            // 只缓存已找齐的人员，缺人或未指派的需求下次仍需查询。
+            if (cacheKey && assignees.every((group) => group.length && group.every(Boolean))) {
+              GM_setValue(cacheKey, { names, savedAt: Date.now() })
+            }
           }
         } catch (error) {
           for (const { cells } of rows) {
@@ -493,7 +504,7 @@
     for (const key of GM_listValues()) {
       if (keepKeys.has(key)) continue
       const date = key.match(/^prototypeTask(?:Pages|Cohort):(\d{4}-\d{2}-\d{2})$/)?.[1]
-      const savedAt = date ? Date.parse(`${date}T00:00:00`) : key.startsWith('storyLink:') ? GM_getValue(key).savedAt : undefined
+      const savedAt = date ? Date.parse(`${date}T00:00:00`) : key.startsWith('storyLink:') || key.startsWith('storyAssignees:') ? GM_getValue(key).savedAt : undefined
       if (savedAt < expiredAt) GM_deleteValue(key)
     }
   }
