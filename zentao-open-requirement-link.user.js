@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.9.0
+// @version      1.9.1
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.0
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.1
 
 ;(function () {
   'use strict'
@@ -141,6 +141,9 @@
       #tasktable tbody tr[data-zentao-unfinished] .c-name > div::before {
         background-color: #c58b16;
       }
+      #tasktable tbody .c-name > div > .label-badge {
+        flex-shrink: 0;
+      }
     `
     document.head.append(style)
     const widths = {
@@ -149,7 +152,7 @@
       project: '160px',
       name: 'auto',
       openedBy: '72px',
-      assignedTo: '72px',
+      assignedTo: '96px',
       finishedBy: '80px',
       estimate: '48px',
       consumed: '48px',
@@ -207,6 +210,7 @@
     const buttons = new Map()
     for (const taskLink of table.querySelectorAll(`tbody ${TASK_LINK}`)) {
       const [, id] = taskLink.pathname.match(/\/task-view-(\d+)\.html$/)
+      const cell = taskLink.closest('.c-name')
       const button = createLinkButton(taskLink.href, '_blank')
       button.title = '查看任务详情'
       button.style.flexShrink = '0'
@@ -220,8 +224,8 @@
       taskLink.style.overflow = 'hidden'
       taskLink.style.textOverflow = 'ellipsis'
       taskLink.title = taskLink.textContent.trim()
-      taskLink.before(row)
-      row.append(taskLink, button)
+      row.append(...cell.childNodes, button)
+      cell.append(row)
       buttons.set(id, button)
     }
     return buttons
