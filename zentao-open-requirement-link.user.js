@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.8.7
+// @version      1.8.9
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.7
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.8.9
 
 ;(function () {
   'use strict'
@@ -131,11 +131,15 @@
   function layoutTaskTable(table) {
     const style = document.createElement('style')
     style.textContent = `
-      #tasktable tbody tr[data-zentao-unfinished]:not(:has(input[type="checkbox"]:checked)) > td {
-        background-color: #fff8e6;
+      #tasktable tbody .c-name > div::before {
+        content: '';
+        flex: 0 0 7px;
+        inline-size: 7px;
+        block-size: 7px;
+        border-radius: 50%;
       }
-      #tasktable tbody tr[data-zentao-unfinished]:not(:has(input[type="checkbox"]:checked)):hover > td {
-        background-color: #fff0c2;
+      #tasktable tbody tr[data-zentao-unfinished] .c-name > div::before {
+        background-color: #c58b16;
       }
     `
     document.head.append(style)
