@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.9.10
+// @version      1.9.11
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.10
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.11
 
 ;(function () {
   'use strict'
@@ -42,10 +42,11 @@
     addProjectDeadlines(table, projectDeadlines)
     const buttons = addTaskButtons(table)
     layoutTaskTable(table)
+    const updateColumnSettings = addTaskTableSettings(table)
     if (!buttons.size) return
     const assignedTasks = readTasks('my-task-assignedTo-id_desc')
     Promise.all([
-      addTaskAssignees(table, buttons, projectDeadlines, assignedTasks),
+      addTaskAssignees(table, buttons, projectDeadlines, assignedTasks, updateColumnSettings),
       syncTaskLinks(buttons, projectDeadlines, undefined, assignedTasks),
     ]).catch((error) => {
       const message = document.createElement('p')
@@ -140,6 +141,48 @@
   function layoutTaskTable(table) {
     const style = document.createElement('style')
     style.textContent = `
+      .zentao-task-settings {
+        display: flex;
+        justify-content: flex-end;
+        margin-block: 8px;
+      }
+      .zentao-column-settings {
+        position: relative;
+      }
+      .zentao-column-settings > summary {
+        list-style: none;
+        cursor: pointer;
+      }
+      .zentao-column-settings > summary::-webkit-details-marker {
+        display: none;
+      }
+      .zentao-column-options {
+        position: absolute;
+        inset-inline-end: 0;
+        inset-block-start: calc(100% + 4px);
+        z-index: 1000;
+        min-inline-size: 140px;
+        max-block-size: min(60vh, 420px);
+        overflow-y: auto;
+        padding: 8px;
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        box-shadow: 0 4px 12px #0002;
+      }
+      .zentao-column-options label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+        padding: 4px 8px;
+        white-space: nowrap;
+        font-weight: normal;
+        cursor: pointer;
+      }
+      .zentao-column-options input {
+        margin: 0;
+      }
       #tasktable tbody .c-name > div::before,
       #tasktable .zentao-assignee-status {
         content: '';
@@ -187,8 +230,7 @@
       操作: '176px',
     }
     for (const header of table.tHead.rows[0].cells) {
-      const field = header.querySelector('a[href]')?.getAttribute('href').match(/-([a-z]+)_(?:asc|desc)(?:-|\.html)/i)?.[1]
-      const width = widths[field ?? header.textContent.trim()]
+      const width = widths[getTaskColumnKey(header)]
       if (width) header.style.setProperty('width', width, 'important')
     }
     table.style.tableLayout = 'fixed'
@@ -198,6 +240,57 @@
     container.style.overflowX = 'auto'
     table.before(container)
     container.append(table)
+  }
+
+  function getTaskColumnKey(header) {
+    return header.querySelector('a[href]')?.getAttribute('href').match(/-([a-z]+)_(?:asc|desc)(?:-|\.html)/i)?.[1] ?? header.textContent.trim()
+  }
+
+  function addTaskTableSettings(table) {
+    const storageKey = 'taskColumnVisibility:' + (document.querySelector('#userNav .user-name')?.textContent.trim() ?? '')
+    const visibility = GM_getValue(storageKey, {})
+    const toolbar = document.createElement('div')
+    toolbar.className = 'zentao-task-settings'
+    const settings = document.createElement('details')
+    settings.className = 'zentao-column-settings'
+    const summary = document.createElement('summary')
+    summary.className = 'btn btn-default btn-sm'
+    summary.textContent = '设置'
+    const options = document.createElement('div')
+    options.className = 'zentao-column-options'
+    settings.append(summary, options)
+    toolbar.append(settings)
+    table.parentElement.before(toolbar)
+    const style = document.createElement('style')
+    document.head.append(style)
+
+    const update = () => {
+      const columns = Array.from(table.tHead.rows[0].cells, (header, index) => ({ key: getTaskColumnKey(header), name: header.textContent.trim(), index: index + 1 }))
+      const isVisible = (key) => visibility[key] ?? !['pri', 'estimate', 'left'].includes(key)
+      const applyVisibility = () => {
+        // 保留单元格，避免影响禅道及人员列插入时使用的列索引；空表提示的跨列单元格保持显示。
+        style.textContent = columns.filter(({ key }) => key && !isVisible(key)).map(({ index }) => `
+          #tasktable thead tr > :nth-child(${index}),
+          #tasktable tbody tr > :nth-child(${index}):not([colspan]) { display: none !important; }
+        `).join('')
+      }
+      options.replaceChildren(...columns.filter(({ key }) => key).map(({ key, name }) => {
+        const label = document.createElement('label')
+        const checkbox = document.createElement('input')
+        checkbox.type = 'checkbox'
+        checkbox.checked = isVisible(key)
+        checkbox.addEventListener('change', () => {
+          visibility[key] = checkbox.checked
+          GM_setValue(storageKey, visibility)
+          applyVisibility()
+        })
+        label.append(checkbox, name)
+        return label
+      }))
+      applyVisibility()
+    }
+    update()
+    return update
   }
 
   async function addProjectDeadlines(table, projectDeadlines) {
@@ -255,7 +348,7 @@
     return buttons
   }
 
-  async function addTaskAssignees(table, buttons, projectDeadlines, assignedTasks) {
+  async function addTaskAssignees(table, buttons, projectDeadlines, assignedTasks, updateColumnSettings) {
     const assignedHeader = table.querySelector('thead a[href*="-assignedTo_"]')?.closest('th')
     if (!assignedHeader) return
 
@@ -289,6 +382,7 @@
         }
         headers[index].textContent = label
       })
+      updateColumnSettings()
     }
     // 沿用当前用户上次的列布局，首次使用先预留两列，避免等待接口时挤动表格。
     setColumns(GM_getValue(layoutKey, ['', '']))
@@ -402,7 +496,7 @@
         dot.title = `任务 ${ids.map((id) => `#${id}`).join('、')}：${statusLabels[status] || status}`
         dot.setAttribute('role', 'img')
         dot.setAttribute('aria-label', `${name}，${dot.title}`)
-        person.append(dot)
+        person.prepend(dot)
         cell.append(person)
       })
     })
