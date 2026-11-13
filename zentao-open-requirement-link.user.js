@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.9.6
+// @version      1.9.10
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.6
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.10
 
 ;(function () {
   'use strict'
@@ -140,15 +140,29 @@
   function layoutTaskTable(table) {
     const style = document.createElement('style')
     style.textContent = `
-      #tasktable tbody .c-name > div::before {
+      #tasktable tbody .c-name > div::before,
+      #tasktable .zentao-assignee-status {
         content: '';
         flex: 0 0 7px;
         inline-size: 7px;
         block-size: 7px;
         border-radius: 50%;
       }
-      #tasktable tbody tr[data-zentao-unfinished] .c-name > div::before {
+      #tasktable .zentao-assignee-status {
+        background-color: #adb5bd;
+      }
+      #tasktable tbody tr[data-zentao-unfinished] .c-name > div::before,
+      #tasktable .zentao-assignee-status:is([data-status="wait"], [data-status="doing"], [data-status="pause"]) {
         background-color: #c58b16;
+      }
+      #tasktable .zentao-assignee-status[data-status="done"] {
+        background-color: #38b03f;
+      }
+      #tasktable .zentao-assignee {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        white-space: nowrap;
       }
       #tasktable tbody .c-name > div > .label-badge {
         flex-shrink: 0;
@@ -168,8 +182,8 @@
       left: '48px',
       status: '80px',
       截止日期: '100px',
-      后端: '72px',
-      测试: '72px',
+      后端: '88px',
+      测试: '88px',
       操作: '176px',
     }
     for (const header of table.tHead.rows[0].cells) {
@@ -261,7 +275,7 @@
         if (!headers[index]) {
           const header = document.createElement('th')
           header.scope = 'col'
-          header.style.width = '72px'
+          header.style.width = '88px'
           ;(headers[index - 1] ?? assignedHeader).after(header)
           headers.push(header)
           for (const { assignedCell, cells } of rows) {
@@ -311,20 +325,19 @@
       const deadline = deadlines.get(project)
       return deadline && new Date(`${deadline}T00:00:00`).getTime() >= today
     })
-    const pendingRows = upcomingRows.filter((row) => {
+    // 缓存只用于先显示结果，每次刷新仍重新读取关联任务状态。
+    for (const row of upcomingRows) {
       row.cacheKey = Number(row.task?.story) > 0 ? `storyAssignees:${row.project}/${row.task.story}/${labels.join('/')}` : null
-      if (!row.cacheKey) return true
-      const cached = GM_getValue(row.cacheKey)
-      if (!cached || Date.now() - cached.savedAt >= 24 * 60 * 60 * 1000) return true
-      row.cells.forEach((cell, index) => { cell.textContent = cached.names[index] })
-      return false
-    })
+      const cached = row.cacheKey ? GM_getValue(row.cacheKey) : null
+      if (cached?.people && Date.now() - cached.savedAt < 24 * 60 * 60 * 1000 && (!cached.completedOnly || row.task.status === 'done')) {
+        renderTaskAssignees(row.cells, cached.people)
+      } else {
+        for (const cell of row.cells) cell.textContent = '…'
+      }
+    }
 
     await Promise.all(
-      Object.entries(Object.groupBy(pendingRows, (row) => row.project)).map(async ([project, rows]) => {
-        for (const { cells } of rows) {
-          for (const cell of cells) cell.textContent = '…'
-        }
+      Object.entries(Object.groupBy(upcomingRows, (row) => row.project)).map(async ([project, rows]) => {
         try {
           const { tasks, users } = await readRelatedTasks(project, rows, assigned)
           const tasksByStory = Object.groupBy(
@@ -335,13 +348,28 @@
             const related = tasksByStory[task?.story] ?? []
             const assignees = roles.map(({ matches }) => related.filter(matches).map((task) => {
               const account = task.finishedBy || task.assignedTo
-              return account ? users[account] || account : null
+              // 完成后被关闭的任务仍按已完成显示，只有取消关闭的才显示为已关闭。
+              const status = task.status === 'closed' && task.closedReason === 'done' ? 'done' : task.status
+              return { name: account ? users[account] || account : null, id: task.id, status }
             }))
-            const names = assignees.map((group) => [...new Set(group.map((name) => name || '未指派'))].join('、') || '—')
-            cells.forEach((cell, index) => { cell.textContent = names[index] })
-            // 只缓存已找齐的人员，缺人或未指派的需求下次仍需查询。
-            if (cacheKey && assignees.every((group) => group.length && group.every(Boolean))) {
-              GM_setValue(cacheKey, { names, savedAt: Date.now() })
+            const rank = (status) => (UNFINISHED.includes(status) ? 2 : Number(status === 'done'))
+            // 同一人有多个任务时，圆点显示最需要关注的状态。
+            const people = assignees.map((group) => Array.from(Map.groupBy(group, ({ name }) => name), ([name, tasks]) => ({
+              name,
+              status: tasks.reduce((a, b) => (rank(b.status) > rank(a.status) ? b : a)).status,
+              ids: tasks.map(({ id }) => id),
+            })))
+            renderTaskAssignees(cells, people)
+            const complete = assignees.every((group) => group.length && group.every(({ name }) => name))
+            const testers = assignees[labels.indexOf('测试')]
+            const completedWithTest = task?.status === 'done' && testers?.length && testers.every(({ name }) => name)
+            const settled = assignees.flat().every(({ status }) => !UNFINISHED.includes(status))
+            // 已完成且已找到测试的任务也可缓存，缺人的结果只供已完成任务复用。
+            // 还有未完成的任务时状态随时会变，不缓存。
+            if (cacheKey && settled && (complete || completedWithTest)) {
+              GM_setValue(cacheKey, { people, savedAt: Date.now(), completedOnly: !complete })
+            } else if (cacheKey) {
+              GM_deleteValue(cacheKey)
             }
           }
         } catch (error) {
@@ -352,6 +380,32 @@
         }
       })
     )
+  }
+
+  function renderTaskAssignees(cells, people) {
+    const statusLabels = { wait: '未开始', doing: '进行中', pause: '已暂停', done: '已完成', closed: '已关闭', cancel: '已取消' }
+    cells.forEach((cell, index) => {
+      cell.replaceChildren()
+      if (!people[index].length) cell.append('—')
+      people[index].forEach(({ name, status, ids }, order) => {
+        if (order) cell.append('、')
+        if (!name) {
+          cell.append('未指派')
+          return
+        }
+        const person = document.createElement('span')
+        person.className = 'zentao-assignee'
+        person.textContent = name
+        const dot = document.createElement('span')
+        dot.className = 'zentao-assignee-status'
+        dot.dataset.status = status
+        dot.title = `任务 ${ids.map((id) => `#${id}`).join('、')}：${statusLabels[status] || status}`
+        dot.setAttribute('role', 'img')
+        dot.setAttribute('aria-label', `${name}，${dot.title}`)
+        person.append(dot)
+        cell.append(person)
+      })
+    })
   }
 
   async function readOrganizationRoles() {
