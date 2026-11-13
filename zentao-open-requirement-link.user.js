@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.9.11
+// @version      1.9.12
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.11
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.12
 
 ;(function () {
   'use strict'
@@ -141,15 +141,25 @@
   function layoutTaskTable(table) {
     const style = document.createElement('style')
     style.textContent = `
-      .zentao-task-settings {
+      .zentao-task-menu {
         display: flex;
-        justify-content: flex-end;
-        margin-block: 8px;
+        align-items: center;
+        gap: 8px;
+      }
+      .zentao-task-filters {
+        margin-inline-end: auto;
       }
       .zentao-column-settings {
         position: relative;
+        flex-shrink: 0;
       }
       .zentao-column-settings > summary {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        inline-size: 32px;
+        block-size: 32px;
+        padding: 0;
         list-style: none;
         cursor: pointer;
       }
@@ -249,18 +259,23 @@
   function addTaskTableSettings(table) {
     const storageKey = 'taskColumnVisibility:' + (document.querySelector('#userNav .user-name')?.textContent.trim() ?? '')
     const visibility = GM_getValue(storageKey, {})
-    const toolbar = document.createElement('div')
-    toolbar.className = 'zentao-task-settings'
+    const toolbar = document.querySelector('a.btn-active-text[href$="my-task-assignedTo.html"]').closest('.btn-toolbar')
+    toolbar.classList.add('zentao-task-filters')
+    toolbar.parentElement.classList.add('zentao-task-menu')
     const settings = document.createElement('details')
     settings.className = 'zentao-column-settings'
     const summary = document.createElement('summary')
-    summary.className = 'btn btn-default btn-sm'
-    summary.textContent = '设置'
+    summary.className = 'btn btn-link btn-sm'
+    summary.title = '设置显示列'
+    summary.setAttribute('aria-label', '设置显示列')
+    const icon = document.createElement('i')
+    icon.className = 'icon icon-cog'
+    icon.setAttribute('aria-hidden', 'true')
+    summary.append(icon)
     const options = document.createElement('div')
     options.className = 'zentao-column-options'
     settings.append(summary, options)
-    toolbar.append(settings)
-    table.parentElement.before(toolbar)
+    toolbar.parentElement.append(settings)
     const style = document.createElement('style')
     document.head.append(style)
 
