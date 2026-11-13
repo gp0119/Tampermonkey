@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.9.13
+// @version      1.9.14
 // @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -15,7 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.13
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.14
 
 ;(function () {
   'use strict'
@@ -193,6 +193,11 @@
       .zentao-column-options input {
         margin: 0;
       }
+      #tasktable tbody td {
+        height: 36px;
+        line-height: 20px;
+        vertical-align: middle;
+      }
       #tasktable tbody .c-name > div::before,
       #tasktable .zentao-assignee-status {
         content: '';
@@ -214,6 +219,7 @@
       #tasktable .zentao-assignee {
         display: inline-flex;
         align-items: center;
+        vertical-align: top;
         gap: 4px;
         white-space: nowrap;
       }
