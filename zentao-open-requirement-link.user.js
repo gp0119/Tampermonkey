@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      1.9.14
-// @description  在禅道任务列表查看需求链接、项目截止日期及同需求的其他角色人员，并在原型目录标记任务状态
+// @version      2.1.4
+// @description  在禅道任务列表查看需求链接、项目截止日期和协作人员，批量完成任务，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @match        *://zentao.chaomeifan.com/*
 // @match        *://redmine.chaomeifan.com/*
 // @run-at       document-idle
+// @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_listValues
@@ -15,7 +16,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=1.9.14
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=2.1.4
 
 ;(function () {
   'use strict'
@@ -23,49 +24,77 @@
   const PROTOTYPE_HOST = 'redmine.chaomeifan.com'
   const PROTOTYPE_COHORT_KEY = 'prototypeTaskPages:'
   const DEADLINE_PARAM = 'zentaoDeadline'
-  const DETAIL_TITLE = '.detail > .detail-title'
-  const TASK_LINK = '.c-name a[href*="/task-view-"]'
+  const ASSIGNED_TASKS_PAGE = /\/my-work-task(?:-assignedTo(?:-.*)?)?\.html$/
+  const DETAIL_TITLE = '.detail-section > .detail-section-title'
+  const ROLES = ['前端', '后端', '测试']
   const UNFINISHED = ['wait', 'doing', 'pause']
   const pendingZenTaoRequests = new Map()
   const zenTaoRequestQueue = []
+  const storyLinkRequests = new Map()
+  const cohortRequests = new Map()
+  let projectDeadlines
   let activeZenTaoRequests = 0
+  let batchFinishing = false
 
   if (location.hostname === PROTOTYPE_HOST) {
-    if (window.top === window) enhancePrototypePages()
+    enhancePrototypePages()
     return
   }
 
-  if (document.querySelector('a.btn-active-text[href$="my-task-assignedTo.html"]')) {
-    const table = document.querySelector('#tasktable')
-    if (!table) return
-    const projectDeadlines = readProjectDeadlines()
-    addProjectDeadlines(table, projectDeadlines)
-    const buttons = addTaskButtons(table)
-    layoutTaskTable(table)
-    const updateColumnSettings = addTaskTableSettings(table)
-    if (!buttons.size) return
-    const assignedTasks = readTasks('my-task-assignedTo-id_desc')
-    Promise.all([
-      addTaskAssignees(table, buttons, projectDeadlines, assignedTasks, updateColumnSettings),
-      syncTaskLinks(buttons, projectDeadlines, undefined, assignedTasks),
-    ]).catch((error) => {
-      const message = document.createElement('p')
-      message.textContent = '部分需求信息未同步，请刷新页面重试。'
-      message.setAttribute('role', 'status')
-      table.before(message)
-      console.error('加载禅道需求信息失败', error)
-    })
-  } else {
-    for (const title of document.querySelectorAll(DETAIL_TITLE)) {
-      const link = getRequirementLink(title, location.href)
-      if (link) addDetailButton(title, link)
+  observeZenTao()
+
+  function observeZenTao() {
+    const frames = new WeakSet()
+    const documents = new WeakSet()
+    const observedTitles = new WeakSet()
+    const taskProjects = new Map()
+
+    function observe(doc, pageWindow) {
+      if (!doc || documents.has(doc)) return
+      documents.add(doc)
+      let frame
+      let gridState
+      function update() {
+        frame = undefined
+        if (doc === document) {
+          // 禅道外壳在同源 iframe 中打开各应用，切换应用时会保留已经打开的 iframe。
+          for (const app of doc.querySelectorAll('iframe[id^="appIframe-"]')) {
+            const connect = () => observe(app.contentDocument, pageWindow.frames[app.name])
+            if (!frames.has(app)) {
+              frames.add(app)
+              app.addEventListener('load', connect)
+            }
+            connect()
+          }
+        }
+        if (ASSIGNED_TASKS_PAGE.test(doc.location.pathname)) {
+          gridState = enhanceTaskTable(doc, pageWindow, gridState, taskProjects)
+        }
+        for (const title of doc.querySelectorAll(DETAIL_TITLE)) {
+          if (observedTitles.has(title)) continue
+          const link = getRequirementLink(title, doc.location.href)
+          if (!link) continue
+          observedTitles.add(title)
+          const scope = title.closest('.modal-content') ?? doc
+          const taskID = scope.querySelector('.detail-header [id^="zin_task_view_"] .label-id')?.textContent.trim()
+          const project = scope.querySelector('a[href*="/project-view-"], a[href*="/project-browse-"]')
+          const id = taskProjects.get(taskID) ?? project?.pathname.match(/\/project-(?:view|browse)-(\d+)\.html$/)?.[1]
+          addDetailButton(title, link, id)
+        }
+      }
+      // 禅道会用 document.open() 替换 iframe 的 body。
+      new MutationObserver(() => {
+        frame ??= requestAnimationFrame(update)
+      }).observe(doc, { childList: true, subtree: true })
+      update()
     }
+    observe(document, unsafeWindow)
   }
 
   function getRequirementLink(title, baseUrl) {
-    if (title.textContent.trim() !== '需求描述') return
+    if (!/^(?:需求描述|\[需求描述\])$/.test(title.textContent.trim())) return
     const content = title.nextElementSibling
-    if (!content?.matches('.detail-content')) return
+    if (!content?.matches('.detail-section-content')) return
     return parseRequirementLink(content, baseUrl)
   }
 
@@ -89,36 +118,28 @@
     button.href = href
     button.target = target
     button.rel = 'noopener'
-    button.className = 'btn btn-default btn-sm'
-    button.style.marginInlineStart = 'auto'
+    button.className = 'btn size-sm flex-none'
     button.textContent = '查看'
     return button
   }
 
-  async function addDetailButton(title, link) {
-    const button = createLinkButton(link.url, link.target)
-    title.style.display = 'flex'
-    title.style.alignItems = 'center'
-    title.style.columnGap = '8px'
-    title.append(button)
-    const project = document.querySelector('.breadcrumb a[href*="/project-browse-"]')
-    const id = project?.pathname.match(/\/project-browse-(\d+)\.html$/)?.[1]
+  async function addDetailButton(title, link, project) {
+    const button = createLinkButton(link.url, link.target || '_blank')
     const prototype = prototypePageReference(new URL(link.url))
-    if (id && prototype) {
+    if (!prototype) button.textContent = '查看需求'
+    button.style.marginInlineStart = '8px'
+    title.append(button)
+    if (project && prototype) {
       // 截止日期就绪前不可点击，否则原型页拿不到日期参数，打开后也无法再补上。
       button.removeAttribute('href')
       button.classList.add('disabled')
       button.setAttribute('aria-disabled', 'true')
-      const projectDeadlines = readProjectDeadlines()
-      const deadline = (await projectDeadlines)?.get(id)
+      const deadline = (await getProjectDeadlines())?.get(project)
       button.href = deadline ? linkWithDeadline(link.url, deadline, prototype.part) : link.url
       button.classList.remove('disabled')
       button.removeAttribute('aria-disabled')
       if (deadline) {
-        const refresh = () =>
-          syncTaskLinks(new Map(), projectDeadlines, deadline).catch((error) => {
-            console.error('加载同截止日期的禅道任务失败', error)
-          })
+        const refresh = () => syncPrototypeCohort(deadline).catch(reportCohortError)
         if (GM_getValue(PROTOTYPE_COHORT_KEY + deadline)) {
           button.addEventListener('click', refresh, { once: true })
         } else {
@@ -126,6 +147,10 @@
         }
       }
     }
+  }
+
+  function getProjectDeadlines() {
+    return projectDeadlines ??= readProjectDeadlines()
   }
 
   async function readProjectDeadlines() {
@@ -138,374 +163,382 @@
     }
   }
 
-  function layoutTaskTable(table) {
-    const style = document.createElement('style')
+  function enhanceTaskTable(doc, pageWindow, previous, taskProjects) {
+    const grid = doc.getElementById('table-my-work')
+    const holder = grid?.parentElement
+    const table = holder && pageWindow.zui?.DTable?.get(holder)
+    if (!table) return
+
+    const { data, cols, onRenderCell, bordered } = table.options
+    const alreadyEnhanced = previous?.table === table && previous.data === data && previous.renderCell === onRenderCell
+    if (alreadyEnhanced || !data.length) {
+      if (!bordered) table.render({ bordered: true })
+      return alreadyEnhanced ? previous : undefined
+    }
+
+    const nativeRenderCell = previous?.renderCell === onRenderCell ? previous.nativeRenderCell : onRenderCell
+    const account = pageWindow.config.account
+    const tasks = data.map((task) => ({ ...task, status: task.rawStatus }))
+    const mine = tasks.filter((task) => task.assignedTo === account)
+    const currentRole = ROLES.find((role) => mine.some(({ name }) => name.includes(`【${role}】`)))
+      ?? previous?.currentRole
+      ?? (mine.length && mine.every(({ type }) => type === 'test') ? '测试' : undefined)
+    const labels = ROLES.filter((label) => label !== currentRole)
+    const rows = new Map(tasks.map((task) => {
+      const id = String(task.id)
+      const project = String(task.project)
+      taskProjects.set(id, project)
+      const button = createLinkButton(new URL(`task-view-${id}.html`, doc.location.href).href, '_blank')
+      button.classList.replace('size-sm', 'size-xs')
+      button.title = '查看任务详情'
+      const cells = labels.map(() => {
+        const cell = doc.createElement('span')
+        cell.textContent = '—'
+        return cell
+      })
+      return [id, { id, task, project, button, cells }]
+    }))
+
+    const columns = cols.filter(({ name }) => !name.startsWith('zentao-')).map((col) => {
+      if (col.name === 'name' && Number(col.width) === 0.44 && !col.extraWidth) return { ...col, width: 0.36 }
+      // 136px 是禅道文本列的默认宽度。让项目和原型名称使用任务表的剩余空间。
+      if (col.name !== 'project' || Number(col.width) !== 136) return col
+      return { ...col, width: col.extraWidth ? col.width : 248, flex: 1 }
+    })
+    const dateColumn = { name: 'zentao-project-end', title: '项目截止', type: 'text', width: 96, sortType: false }
+    const projectIndex = columns.findIndex(({ name }) => name === 'project')
+    columns.splice(projectIndex >= 0 ? projectIndex + 1 : columns.findIndex(({ name }) => name === 'actions'), 0, dateColumn)
+    const roleAnchor = columns.find(({ name }) => name === 'assignedTo')
+      ?? columns.find(({ name }) => name === 'project')
+      ?? columns.at(-1)
+    const anchorIndex = columns.indexOf(roleAnchor)
+    // 禅道按 order 排列各列，让角色列共用顺序值，避免中间插入其他列。
+    const order = Number(roleAnchor.order ?? anchorIndex) + 0.5
+    const roleColumns = labels.map((title) => ({ name: `zentao-${title}`, title, type: 'text', width: title === '测试' ? 88 : 80, sortType: false, order }))
+    columns.splice(anchorIndex + 1, 0, ...roleColumns)
+
+    function renderCell(result, info) {
+      const content = nativeRenderCell?.call(this, result, info) ?? result
+      const row = rows.get(String(info.row.data?.id))
+      if (!row) return content
+      if (info.col.name === 'name') return [...content, { html: row.button.outerHTML, className: 'zentao-task-link' }]
+      if (info.col.name === 'project' && row.prototypeLabel) return [...content, { html: row.prototypeLabel, className: 'zentao-prototype-label' }]
+      if (info.col.name === dateColumn.name) return [row.deadline ?? '—']
+      const roleIndex = roleColumns.findIndex(({ name }) => name === info.col.name)
+      if (roleIndex >= 0) return [{ html: row.cells[roleIndex].innerHTML }]
+      return content
+    }
+    let frame
+    const refresh = () => {
+      frame ??= requestAnimationFrame(() => {
+        frame = undefined
+        if (holder.isConnected && table.options.data === data && table.options.onRenderCell === renderCell) table.render()
+      })
+    }
+
+    addTaskStyles(doc)
+    table.render({ cols: columns, bordered: true, onRenderCell: renderCell, footToolbar: addBatchFinishButton(table, pageWindow) })
+    const deadlines = getProjectDeadlines()
+    deadlines.then((projects) => {
+      if (!projects) return
+      const dates = new Set()
+      for (const row of rows.values()) {
+        row.deadline = projects.get(row.project)
+        if (row.deadline) dates.add(row.deadline)
+      }
+      refresh()
+      for (const date of dates) syncPrototypeCohort(date).catch(reportCohortError)
+    })
+    for (const row of rows.values()) {
+      if (!Number(row.task.story)) continue
+      const apply = (link) => {
+        if (link) updateTaskButton(row, link)
+        else {
+          row.button.href = new URL(`task-view-${row.id}.html`, doc.location.href).href
+          row.button.target = '_blank'
+          row.button.textContent = '查看'
+          row.button.title = '查看任务详情'
+          row.prototypeLabel = undefined
+        }
+        refresh()
+      }
+      deadlines.then(() => {
+        const cached = GM_getValue(storyLinkKey(row.task))
+        if (cached) apply(cached.link)
+      })
+      Promise.all([loadStoryLink(row.task), deadlines]).then(([link]) => apply(link)).catch((error) => {
+        if (row.button.title === '查看任务详情') row.button.title = '需求链接读取失败，点击查看任务详情'
+        refresh()
+        console.error('读取需求链接失败', error)
+      })
+    }
+    addTaskAssignees([...rows.values()], labels, deadlines, refresh)
+    return { table, data, currentRole, nativeRenderCell, renderCell }
+  }
+
+  function addBatchFinishButton(table, pageWindow) {
+    const toolbar = table.options.footToolbar
+    if (!toolbar) return toolbar
+    const items = toolbar.items.filter(({ key }) => key !== 'zentao-batch-finish')
+    const closeIndex = items.findIndex((item) => item['data-url']?.includes('/task-batchClose'))
+    const button = {
+      key: 'zentao-batch-finish',
+      text: '批量完成',
+      disabled: batchFinishing,
+      onClick: () => finishSelectedTasks(table, pageWindow, button),
+    }
+    items.splice(closeIndex < 0 ? items.length : closeIndex + 1, 0, button)
+    return { ...toolbar, items }
+  }
+
+  async function finishSelectedTasks(table, pageWindow, button) {
+    if (batchFinishing) return
+    const notify = (type, content) => pageWindow.zui.Messager.show({ type, content })
+    const selected = table.$.getChecks().map((id) => table.$.getRowInfo(id)?.data).filter(Boolean)
+    if (!selected.length) {
+      notify('warning', '请先勾选任务')
+      return
+    }
+    const eligible = selected.filter((task) => task.actions.some(({ name, disabled }) => name === 'finish' && !disabled))
+    if (!eligible.length) {
+      notify('warning', '所选任务中没有可执行「完成」的任务')
+      return
+    }
+
+    const listUrl = pageWindow.location.href
+    const account = pageWindow.config.account
+    let skipped = selected.length - eligible.length
+    let succeeded = 0
+    const failed = []
+    batchFinishing = true
+    button.disabled = true
+    button.text = '完成中…'
+    try {
+      table.render()
+      for (const { id } of eligible) {
+        try {
+          if (await finishTask(id, listUrl, account)) succeeded++
+          else skipped++
+        } catch (error) {
+          failed.push(id)
+          console.error(`禅道任务 #${id} 需核对状态、指派人和工时`, error)
+        }
+      }
+    } finally {
+      batchFinishing = false
+      if (table.element.isConnected) {
+        // 处理期间分页或排序可能重新生成工具栏。
+        const currentButton = table.options.footToolbar.items.find(({ key }) => key === button.key)
+        if (currentButton) {
+          currentButton.disabled = false
+          currentButton.text = '批量完成'
+          table.render()
+        }
+      }
+    }
+
+    const summary = [`完成操作成功 ${succeeded} 项`]
+    if (skipped) summary.push(`跳过 ${skipped} 项`)
+    if (failed.length) summary.push(`需核对 ${failed.length} 项（${failed.map((id) => `#${id}`).join('、')}）`)
+    notify(failed.length || !succeeded ? 'warning' : 'success', summary.join('，'))
+    if ((succeeded || failed.length) && pageWindow.location.href === listUrl) pageWindow.loadPage({ url: listUrl, cache: false })
+  }
+
+  async function finishTask(id, baseUrl, account) {
+    const viewUrl = new URL(`task-view-${id}.json`, baseUrl)
+    const { task } = await fetchZenTao(viewUrl)
+    if (!UNFINISHED.includes(task.status) || task.isParent) return false
+    const member = Object.values(task.team ?? {}).find((member) => member.account === account)
+    if (member?.status === 'done' || (!member && task.assignedTo !== account)) return false
+
+    const url = new URL(`task-finish-${id}.html`, baseUrl)
+    const request = async (target, options) => {
+      const response = await fetch(target, {
+        redirect: 'error',
+        signal: AbortSignal.timeout(15000),
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        ...options,
+      })
+      if (!response.ok) throw new Error(`禅道返回 HTTP ${response.status}`)
+      return response
+    }
+    const readForm = async (target, selector) => {
+      const response = await request(target)
+      const doc = new DOMParser().parseFromString(await response.text(), 'text/html')
+      return doc.querySelector(selector)
+    }
+    const form = await readForm(url, '#finishForm form')
+    if (!form) throw new Error('禅道未提供完成表单')
+
+    const body = new FormData(form)
+    // 未挂载的 ZUI 日期选择器还没有生成对应表单字段，读取原生控件的默认值。
+    const dateValue = (name) => {
+      const attribute = 'zui-create-datetimepicker'
+      const options = form.querySelector(`[data-name="${name}"] [${attribute}]`)?.getAttribute(attribute)
+      return options ? JSON.parse(options).defaultValue : body.get(name)
+    }
+    const finishedDate = dateValue('finishedDate')
+    if (!finishedDate) throw new Error('禅道未提供默认完成时间')
+    body.set('finishedDate', finishedDate)
+    body.set('realStarted', dateValue('realStarted') || finishedDate)
+    body.set('assignedTo', account)
+    body.set('currentConsumed', String(Math.floor(Math.random() * 5) + 2))
+
+    const result = await (await request(url, { method: 'POST', body })).json()
+    if (result.result !== 'success') throw new Error('禅道未确认完成', { cause: result.message })
+    if (member) {
+      // 多人任务整体完成时，禅道会把指派人改回创建人。
+      try {
+        const { task: finished } = await fetchZenTao(viewUrl)
+        if (finished.status === 'done' && finished.assignedTo !== account) {
+          const assignUrl = new URL(`task-assignTo-${finished.execution}-${id}.html`, baseUrl)
+          const assignForm = await readForm(assignUrl, 'form:has([data-name="assignedTo"])')
+          if (!assignForm) throw new Error('禅道未提供指派表单')
+          const assignment = new FormData(assignForm)
+          assignment.set('assignedTo', account)
+          const saved = await (await request(assignUrl, { method: 'POST', body: assignment })).json()
+          if (saved.result !== 'success') throw new Error('禅道未确认指派', { cause: saved.message })
+        }
+      } catch (error) {
+        throw new Error('完成操作已保存，请核对指派人', { cause: error })
+      }
+    }
+    return true
+  }
+
+  function addTaskStyles(doc) {
+    if (doc.getElementById('zentao-task-styles')) return
+    const style = doc.createElement('style')
+    style.id = 'zentao-task-styles'
     style.textContent = `
-      .zentao-task-menu {
+      .zentao-task-link {
         display: flex;
-        align-items: center;
-        gap: 8px;
+        flex: none;
+        margin-inline-start: auto;
       }
-      .zentao-task-filters {
-        margin-inline-end: auto;
+      #table-my-work [data-col="name"] .dtable-cell-content > a.overflow-hidden {
+        text-overflow: ellipsis;
       }
-      .zentao-column-settings {
-        position: relative;
-        flex-shrink: 0;
+      .zentao-prototype-label {
+        min-inline-size: 0;
+        margin-inline-start: 6px;
       }
-      .zentao-column-settings > summary {
+      .zentao-prototype-label > .label {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .zentao-assignee {
         display: inline-flex;
         align-items: center;
-        justify-content: center;
-        inline-size: 32px;
-        block-size: 32px;
-        padding: 0;
-        list-style: none;
-        cursor: pointer;
-      }
-      .zentao-column-settings > summary::-webkit-details-marker {
-        display: none;
-      }
-      .zentao-column-options {
-        position: absolute;
-        inset-inline-end: 0;
-        inset-block-start: 100%;
-        z-index: 1000;
-        min-inline-size: 140px;
-        max-block-size: min(60vh, 420px);
-        overflow-y: auto;
-        padding: 8px;
-        background: #fff;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        box-shadow: 0 4px 12px #0002;
-      }
-      .zentao-column-options label {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin: 0;
-        padding: 4px 8px;
+        gap: 4px;
         white-space: nowrap;
-        font-weight: normal;
-        cursor: pointer;
       }
-      .zentao-column-options input {
-        margin: 0;
-      }
-      #tasktable tbody td {
-        height: 36px;
-        line-height: 20px;
-        vertical-align: middle;
-      }
-      #tasktable tbody .c-name > div::before,
-      #tasktable .zentao-assignee-status {
-        content: '';
+      .zentao-assignee-status {
         flex: 0 0 7px;
         inline-size: 7px;
         block-size: 7px;
         border-radius: 50%;
+        background: #adb5bd;
       }
-      #tasktable .zentao-assignee-status {
-        background-color: #adb5bd;
+      .zentao-assignee-status:is([data-status="wait"], [data-status="doing"], [data-status="pause"]) {
+        background: #c58b16;
       }
-      #tasktable tbody tr[data-zentao-unfinished] .c-name > div::before,
-      #tasktable .zentao-assignee-status:is([data-status="wait"], [data-status="doing"], [data-status="pause"]) {
-        background-color: #c58b16;
-      }
-      #tasktable .zentao-assignee-status[data-status="done"] {
-        background-color: #38b03f;
-      }
-      #tasktable .zentao-assignee {
-        display: inline-flex;
-        align-items: center;
-        vertical-align: top;
-        gap: 4px;
-        white-space: nowrap;
-      }
-      #tasktable tbody .c-name > div > .label-badge {
-        flex-shrink: 0;
-      }
+      .zentao-assignee-status[data-status="done"] { background: #38b03f; }
     `
-    document.head.append(style)
-    const widths = {
-      id: '88px',
-      pri: '40px',
-      project: '160px',
-      name: 'auto',
-      openedBy: '72px',
-      assignedTo: '96px',
-      finishedBy: '80px',
-      estimate: '48px',
-      consumed: '48px',
-      left: '48px',
-      status: '80px',
-      截止日期: '100px',
-      后端: '88px',
-      测试: '88px',
-      操作: '176px',
-    }
-    for (const header of table.tHead.rows[0].cells) {
-      const width = widths[getTaskColumnKey(header)]
-      if (width) header.style.setProperty('width', width, 'important')
-    }
-    table.style.tableLayout = 'fixed'
-    table.style.width = '100%'
-    table.style.minWidth = '1480px'
-    const container = document.createElement('div')
-    container.style.overflowX = 'auto'
-    table.before(container)
-    container.append(table)
+    doc.head.append(style)
   }
 
-  function getTaskColumnKey(header) {
-    return header.querySelector('a[href]')?.getAttribute('href').match(/-([a-z]+)_(?:asc|desc)(?:-|\.html)/i)?.[1] ?? header.textContent.trim()
-  }
-
-  function addTaskTableSettings(table) {
-    const storageKey = 'taskColumnVisibility:' + (document.querySelector('#userNav .user-name')?.textContent.trim() ?? '')
-    const visibility = GM_getValue(storageKey, {})
-    const toolbar = document.querySelector('a.btn-active-text[href$="my-task-assignedTo.html"]').closest('.btn-toolbar')
-    toolbar.classList.add('zentao-task-filters')
-    toolbar.parentElement.classList.add('zentao-task-menu')
-    const settings = document.createElement('details')
-    settings.className = 'zentao-column-settings'
-    settings.addEventListener('mouseenter', () => { settings.open = true })
-    settings.addEventListener('mouseleave', () => { settings.open = false })
-    const summary = document.createElement('summary')
-    summary.className = 'btn btn-link btn-sm'
-    summary.title = '设置显示列'
-    summary.setAttribute('aria-label', '设置显示列')
-    summary.addEventListener('mousedown', (event) => event.preventDefault())
-    summary.addEventListener('click', (event) => {
-      if (event.detail) event.preventDefault()
-    })
-    const icon = document.createElement('i')
-    icon.className = 'icon icon-cog'
-    icon.setAttribute('aria-hidden', 'true')
-    summary.append(icon)
-    const options = document.createElement('div')
-    options.className = 'zentao-column-options'
-    settings.append(summary, options)
-    toolbar.parentElement.append(settings)
-    const style = document.createElement('style')
-    document.head.append(style)
-
-    const update = () => {
-      const columns = Array.from(table.tHead.rows[0].cells, (header, index) => ({ key: getTaskColumnKey(header), name: header.textContent.trim(), index: index + 1 }))
-      const isVisible = (key) => visibility[key] ?? !['pri', 'estimate', 'left'].includes(key)
-      const applyVisibility = () => {
-        // 保留单元格，避免影响禅道及人员列插入时使用的列索引；空表提示的跨列单元格保持显示。
-        style.textContent = columns.filter(({ key }) => key && !isVisible(key)).map(({ index }) => `
-          #tasktable thead tr > :nth-child(${index}),
-          #tasktable tbody tr > :nth-child(${index}):not([colspan]) { display: none !important; }
-        `).join('')
-      }
-      options.replaceChildren(...columns.filter(({ key }) => key).map(({ key, name }) => {
-        const label = document.createElement('label')
-        const checkbox = document.createElement('input')
-        checkbox.type = 'checkbox'
-        checkbox.checked = isVisible(key)
-        checkbox.addEventListener('change', () => {
-          visibility[key] = checkbox.checked
-          GM_setValue(storageKey, visibility)
-          applyVisibility()
-        })
-        label.append(checkbox, name)
-        return label
-      }))
-      applyVisibility()
-    }
-    update()
-    return update
-  }
-
-  async function addProjectDeadlines(table, projectDeadlines) {
-    const projectHeader = table.querySelector('thead .c-project')
-    if (!projectHeader) return
-
-    const header = document.createElement('th')
-    header.scope = 'col'
-    header.className = 'w-100px'
-    header.textContent = '截止日期'
-    projectHeader.after(header)
-
-    const rows = Array.from(table.querySelectorAll('tbody .c-project'), (projectCell) => {
-      const id = projectCell.querySelector('a')?.pathname.match(/\/project-browse-(\d+)\.html$/)?.[1]
-      const cell = document.createElement('td')
-      cell.textContent = '—'
-      projectCell.after(cell)
-      return { id, cell }
-    })
-    if (!rows.some(({ id }) => id)) return
-
+  async function addTaskAssignees(rows, labels, projectDeadlines, refresh) {
     const deadlines = await projectDeadlines
     if (!deadlines) {
-      header.title = '截止日期读取失败，请刷新页面重试。'
-      return
-    }
-    for (const { id, cell } of rows) {
-      cell.textContent = deadlines.get(id) ?? '—'
-    }
-  }
-
-  function addTaskButtons(table) {
-    const buttons = new Map()
-    for (const taskLink of table.querySelectorAll(`tbody ${TASK_LINK}`)) {
-      const id = taskLink.pathname.match(/\/task-view-(\d+)\.html$/)?.[1]
-      if (!id) continue
-      const cell = taskLink.closest('.c-name')
-      const button = createLinkButton(taskLink.href, '_blank')
-      button.title = '查看任务详情'
-      button.style.flexShrink = '0'
-      const row = document.createElement('div')
-      row.style.display = 'flex'
-      row.style.alignItems = 'center'
-      row.style.columnGap = '8px'
-      row.style.minWidth = '0'
-      taskLink.style.flex = '1 1 0%'
-      taskLink.style.minWidth = '0'
-      taskLink.style.overflow = 'hidden'
-      taskLink.style.textOverflow = 'ellipsis'
-      taskLink.title = taskLink.textContent.trim()
-      row.append(...cell.childNodes, button)
-      cell.append(row)
-      buttons.set(id, button)
-    }
-    return buttons
-  }
-
-  async function addTaskAssignees(table, buttons, projectDeadlines, assignedTasks, updateColumnSettings) {
-    const assignedHeader = table.querySelector('thead a[href*="-assignedTo_"]')?.closest('th')
-    if (!assignedHeader) return
-
-    const layoutKey = 'assigneeColumns:' + (document.querySelector('#userNav .user-name')?.textContent.trim() ?? '')
-    const headers = []
-    const rows = Array.from(buttons, ([id, button]) => {
-      const element = button.closest('tr')
-      const project = element.querySelector('.c-project a')?.pathname.match(/\/project-browse-(\d+)\.html$/)?.[1]
-      return { id, element, project, assignedCell: element.cells[assignedHeader.cellIndex], cells: [] }
-    })
-    const setColumns = (labels) => {
-      for (const header of headers.splice(labels.length)) header.remove()
       for (const { cells } of rows) {
-        for (const cell of cells.splice(labels.length)) cell.remove()
+        for (const cell of cells) cell.textContent = '读取失败'
       }
-      labels.forEach((label, index) => {
-        if (!headers[index]) {
-          const header = document.createElement('th')
-          header.scope = 'col'
-          header.style.width = '88px'
-          ;(headers[index - 1] ?? assignedHeader).after(header)
-          headers.push(header)
-          for (const { assignedCell, cells } of rows) {
-            const cell = document.createElement('td')
-            cell.textContent = '—'
-            cell.style.whiteSpace = 'normal'
-            cell.style.overflowWrap = 'anywhere'
-            ;(cells[index - 1] ?? assignedCell).after(cell)
-            cells.push(cell)
-          }
-        }
-        headers[index].textContent = label
-      })
-      updateColumnSettings()
-    }
-    // 沿用当前用户上次的列布局，首次使用先预留两列，避免等待接口时挤动表格。
-    setColumns(GM_getValue(layoutKey, ['', '']))
-
-    const [{ tasks: assigned }, deadlines] = await Promise.all([assignedTasks, projectDeadlines])
-    const visibleTasks = assigned.filter((task) => buttons.has(String(task.id)))
-    const assignedById = new Map(visibleTasks.map((task) => [String(task.id), task]))
-    for (const row of rows) {
-      row.task = assignedById.get(row.id)
-      row.element.toggleAttribute('data-zentao-unfinished', UNFINISHED.includes(row.task?.status))
-    }
-    const organizationRoles = await readOrganizationRoles()
-    // 「指派给我」接口返回的任务均指派给当前登录人。
-    const currentRole = organizationRoles.get(assigned[0]?.assignedTo)
-    const roles = ['前端', '后端', '测试'].filter((label) => label !== currentRole).map((label) => ({
-      label,
-      matches: (task) => getTaskRole(task, organizationRoles) === label,
-    }))
-    const labels = roles.map(({ label }) => label)
-    setColumns(labels)
-    GM_setValue(layoutKey, labels)
-
-    if (!deadlines) {
-      for (const { cells } of rows) {
-        for (const cell of cells) {
-          cell.textContent = '读取失败'
-          cell.title = '截止日期读取失败，请刷新页面重试。'
-        }
-      }
+      refresh()
       return
     }
     const today = new Date().setHours(0, 0, 0, 0)
-    const upcomingRows = rows.filter(({ project }) => {
+    const upcomingRows = rows.filter(({ project, task }) => {
       const deadline = deadlines.get(project)
-      return deadline && new Date(`${deadline}T00:00:00`).getTime() >= today
+      return Number(task.story) > 0 && deadline && new Date(`${deadline}T00:00:00`).getTime() >= today
     })
     // 缓存只用于先显示结果，每次刷新仍重新读取关联任务状态。
     for (const row of upcomingRows) {
-      row.cacheKey = Number(row.task?.story) > 0 ? `storyAssignees:${row.project}/${row.task.story}/${labels.join('/')}` : null
-      const cached = row.cacheKey ? GM_getValue(row.cacheKey) : null
+      row.cacheKey = `storyAssignees:22.7/${row.project}/${row.task.story}/${labels.join('/')}`
+      const cached = GM_getValue(row.cacheKey)
       if (cached?.people && Date.now() - cached.savedAt < 24 * 60 * 60 * 1000 && (!cached.completedOnly || row.task.status === 'done')) {
+        row.hasCachedAssignees = true
         renderTaskAssignees(row.cells, cached.people)
       } else {
         for (const cell of row.cells) cell.textContent = '…'
       }
     }
 
-    await Promise.all(
-      Object.entries(Object.groupBy(upcomingRows, (row) => row.project)).map(async ([project, rows]) => {
-        try {
-          const { tasks, users } = await readRelatedTasks(project, rows, assigned)
-          const tasksByStory = Object.groupBy(
-            tasks.filter((task) => Number(task.story) > 0),
-            (task) => task.story
-          )
-          for (const { task, cells, cacheKey } of rows) {
-            const related = tasksByStory[task?.story] ?? []
-            const assignees = roles.map(({ matches }) => related.filter(matches).map((task) => {
-              const account = task.finishedBy || task.assignedTo
-              // 完成后被关闭的任务仍按已完成显示，只有取消关闭的才显示为已关闭。
-              const status = task.status === 'closed' && task.closedReason === 'done' ? 'done' : task.status
-              return { name: account ? users[account] || account : null, id: task.id, status }
-            }))
-            const rank = (status) => (UNFINISHED.includes(status) ? 2 : Number(status === 'done'))
-            // 同一人有多个任务时，圆点显示最需要关注的状态。
-            const people = assignees.map((group) => Array.from(Map.groupBy(group, ({ name }) => name), ([name, tasks]) => ({
-              name,
-              status: tasks.reduce((a, b) => (rank(b.status) > rank(a.status) ? b : a)).status,
-              ids: tasks.map(({ id }) => id),
-            })))
-            renderTaskAssignees(cells, people)
-            const complete = assignees.every((group) => group.length && group.every(({ name }) => name))
-            const testers = assignees[labels.indexOf('测试')]
-            const completedWithTest = task?.status === 'done' && testers?.length && testers.every(({ name }) => name)
-            const settled = assignees.flat().every(({ status }) => !UNFINISHED.includes(status))
-            // 已完成且已找到测试的任务也可缓存，缺人的结果只供已完成任务复用。
-            // 还有未完成的任务时状态随时会变，不缓存。
-            if (cacheKey && settled && (complete || completedWithTest)) {
-              GM_setValue(cacheKey, { people, savedAt: Date.now(), completedOnly: !complete })
-            } else if (cacheKey) {
-              GM_deleteValue(cacheKey)
-            }
-          }
-        } catch (error) {
-          for (const { cells } of rows) {
-            for (const cell of cells) cell.textContent = '读取失败'
-          }
-          console.error('读取同需求的任务指派人失败', error)
+    refresh()
+    const groups = Object.groupBy(upcomingRows, ({ project, task }) => `${project}/${task.story}`)
+    await Promise.all(Object.values(groups).map(async (rows) => {
+      const { project, task: { story } } = rows[0]
+      let related
+      try {
+        related = await readRelatedTasks(project, story, rows, labels)
+      } catch (error) {
+        for (const { cells, hasCachedAssignees } of rows) {
+          if (hasCachedAssignees) continue
+          for (const cell of cells) cell.textContent = '读取失败'
         }
+        console.error(`读取需求 #${story} 的关联任务失败`, error)
+        refresh()
+        return
+      }
+
+      const { results, users } = related
+      const assignees = results.map((result, index) => {
+        if (result.status === 'rejected') {
+          console.error(`读取需求 #${story} 的${labels[index]}任务失败`, result.reason)
+          return null
+        }
+        return result.value.map((task) => {
+          const account = task.finishedBy || task.assignedTo
+          // 完成后被关闭的任务仍按已完成显示。
+          const status = task.status === 'closed' && task.closedReason === 'done' ? 'done' : task.status
+          return { name: account ? users[account] || account : null, id: task.id, status }
+        })
       })
-    )
+      const rank = (status) => (UNFINISHED.includes(status) ? 2 : Number(status === 'done'))
+      // 同一人有多个任务时，圆点显示最需要关注的状态。
+      const people = assignees.map((group) => group && Array.from(Map.groupBy(group, ({ name }) => name), ([name, tasks]) => ({
+        name,
+        status: tasks.reduce((a, b) => (rank(b.status) > rank(a.status) ? b : a)).status,
+        ids: tasks.map(({ id }) => id),
+      })))
+      for (const { cells, hasCachedAssignees } of rows) renderTaskAssignees(cells, people, hasCachedAssignees)
+      // 只缓存完整的读取结果。
+      if (!assignees.includes(null)) {
+        const complete = assignees.every((group) => group.length && group.every(({ name }) => name))
+        const testers = assignees[labels.indexOf('测试')]
+        const settled = assignees.flat().every(({ status }) => !UNFINISHED.includes(status))
+        for (const { task, cacheKey } of rows) {
+          const completedWithTest = task.status === 'done' && testers?.length && testers.every(({ name }) => name)
+          if (settled && (complete || completedWithTest)) {
+            GM_setValue(cacheKey, { people, savedAt: Date.now(), completedOnly: !complete })
+          } else {
+            GM_deleteValue(cacheKey)
+          }
+        }
+      }
+      refresh()
+    }))
   }
 
-  function renderTaskAssignees(cells, people) {
+  function renderTaskAssignees(cells, people, keepCached) {
     const statusLabels = { wait: '未开始', doing: '进行中', pause: '已暂停', done: '已完成', closed: '已关闭', cancel: '已取消' }
     cells.forEach((cell, index) => {
+      if (people[index] === null) {
+        if (!keepCached) cell.textContent = '读取失败'
+        return
+      }
       cell.replaceChildren()
       if (!people[index].length) cell.append('—')
       people[index].forEach(({ name, status, ids }, order) => {
@@ -529,69 +562,40 @@
     })
   }
 
-  async function readOrganizationRoles() {
-    const cached = GM_getValue('organizationRoles')
-    if (cached && Date.now() - cached.savedAt < 7 * 24 * 60 * 60 * 1000) return new Map(cached.roles)
-    const groups = [
-      { role: '前端', departments: [13, 14] }, // 前端组、APP组
-      { role: '后端', departments: [8, 9, 10, 11, 12] }, // 开发一至五组
-      { role: '测试', departments: [2] },
-    ]
-    const members = await Promise.all(groups.flatMap(({ role, departments }) => departments.map(async (id) => {
-      const html = await requestZenTao(new URL(`dept-ajaxGetUsers-${id}.html`, location.href))
-      const doc = new DOMParser().parseFromString(html, 'text/html')
-      const select = doc.querySelector('select[name="user"]')
-      if (!select) throw new Error('组织分组读取失败，请确认登录状态和组织权限')
-      return Array.from(select.options).filter((option) => option.value).map((option) => [option.value, role])
-    })))
-    const roles = members.flat()
-    GM_setValue('organizationRoles', { roles, savedAt: Date.now() })
-    return new Map(roles)
-  }
-
-  function getTaskRole(task, organizationRoles) {
-    const account = task.finishedBy || task.assignedTo
-    if (account) return organizationRoles.get(account)
+  function getTaskRole(task) {
+    const taggedRole = task.name.match(/【(前端|后端|测试)】/)?.[1]
+    if (taggedRole) return taggedRole
     if (task.type === 'test') return '测试'
-    if (task.type === 'devel') return task.name.includes('【前端】') ? '前端' : '后端'
+    if (task.type === 'devel') return '后端'
   }
 
-  async function readRelatedTasks(project, rows, assigned) {
-    const stories = [...new Set(rows.map(({ task }) => task?.story).filter((story) => Number(story) > 0))]
-    const tasksById = new Map(assigned.map((task) => [String(task.id), task]))
-    const relatedIds = new Set()
-    const users = {}
-    let next = 0
-    const readStories = async () => {
-      while (next < stories.length) {
-        // 项目任务列表即使返回 JSON，也会覆盖禅道批量编辑使用的返回地址。
-        const story = stories[next++]
-        const data = await fetchZenTao(new URL(`story-view-${story}.json`, location.href))
-        Object.assign(users, data.users)
-        const storyTasks = flattenTasks(data.story.tasks[project] ?? {}).sort((a, b) => Number(a.id) - Number(b.id))
-        for (const storyTask of storyTasks) {
-          if (storyTask.status === 'cancel') continue
-          const id = String(storyTask.id)
-          relatedIds.add(id)
-          if (tasksById.has(id)) continue
-          // 需求详情里的任务缺少 finishedBy 和 type，只有已指派的未完成任务不需要再查详情。
-          if (storyTask.assignedTo && UNFINISHED.includes(storyTask.status)) {
-            tasksById.set(id, { ...storyTask, story })
-            continue
-          }
-          const { task } = await fetchZenTao(new URL(`task-view-${id}.json`, location.href))
-          for (const loaded of flattenTasks([task])) tasksById.set(String(loaded.id), loaded)
-        }
+  async function readRelatedTasks(project, story, rows, labels) {
+    // 项目任务列表即使返回 JSON，也会覆盖禅道批量编辑使用的返回地址。
+    const data = await fetchZenTao(new URL(`story-view-${story}.json`, location.href))
+    // 新版需求详情按执行分组，一个项目下可能有多个执行。
+    const tasks = Object.values(data.story.tasks ?? {})
+      .flatMap(flattenTasks)
+      .filter((task) => String(task.project) === project && task.status !== 'cancel')
+      .sort((a, b) => Number(a.id) - Number(b.id))
+    const tasksById = new Map(rows.map(({ id, task }) => [id, task]))
+    const byRole = Object.groupBy(tasks, (task) => getTaskRole(tasksById.get(String(task.id)) ?? task))
+    const readTask = async (summary) => {
+      const current = tasksById.get(String(summary.id))
+      if (current) return current
+      // 需求详情里的任务缺少 finishedBy。未完成的任务用当前指派人即可。
+      if (UNFINISHED.includes(summary.status)) return summary
+      try {
+        const { task } = await fetchZenTao(new URL(`task-view-${summary.id}.json`, location.href))
+        return task
+      } catch (error) {
+        throw new Error(`读取关联任务 #${summary.id} 失败`, { cause: error })
       }
     }
-    await Promise.all(Array.from({ length: Math.min(6, stories.length) }, readStories))
-    return { tasks: [...relatedIds].map((id) => tasksById.get(id)), users }
+    const results = await Promise.allSettled(labels.map((label) => Promise.all((byRole[label] ?? []).map(readTask))))
+    return { results, users: data.users ?? {} }
   }
 
-  function setPrototypeLabel(button, folder) {
-    if (button.previousElementSibling?.matches('[data-prototype-label]')) button.previousElementSibling.remove()
-    button.style.marginInlineStart = 'auto'
-    if (!folder) return
+  function createPrototypeLabel(folder) {
     const segments = folder.split('/').filter(Boolean).slice(-2)
     if (!segments.length) return
 
@@ -602,110 +606,75 @@
       // 需求地址包含无法解码的路径时，显示原路径名称。
     }
     const label = document.createElement('span')
-    label.className = 'label label-light'
-    label.dataset.prototypeLabel = ''
+    label.className = 'label gray-pale'
     label.textContent = name
     label.title = name
-    Object.assign(label.style, {
-      marginInlineStart: 'auto',
-      maxWidth: 'min(24%, 160px)',
-      overflow: 'hidden',
-      textOverflow: 'ellipsis',
-      whiteSpace: 'nowrap',
-    })
-    button.style.marginInlineStart = '0'
-    button.before(label)
+    return label.outerHTML
   }
 
-  async function syncTaskLinks(buttons, projectDeadlines, selectedDate, assignedTasks = readTasks('my-task-assignedTo-id_desc')) {
-    const [{ tasks }, deadlines] = await Promise.all([assignedTasks, projectDeadlines])
-    const visibleDates = tasks
-      .filter((task) => buttons.has(String(task.id)))
-      .map((task) => deadlines?.get(String(task.project)))
-      .filter(Boolean)
-    const dates = new Set(selectedDate ? [selectedDate] : visibleDates)
-    const relevantTasks = tasks.filter((task) => Number(task.story) > 0 && (buttons.has(String(task.id)) || dates.has(deadlines?.get(String(task.project)))))
-    const groups = Object.groupBy(relevantTasks, (task) => `${task.story}/${task.storyVersion}/${task.latestStoryVersion}`)
-    const jobs = Object.entries(groups)
-      .map(([version, tasks]) => ({
-        version,
-        tasks,
-        visible: tasks.some((task) => buttons.has(String(task.id))),
-      }))
-      .sort((a, b) => Number(b.visible) - Number(a.visible))
+  function storyLinkKey(task) {
+    return `storyLink:${task.story}/${task.storyVersion}/${task.latestStoryVersion}`
+  }
 
-    const applyLink = (tasks, link) => {
+  function loadStoryLink(task) {
+    const key = storyLinkKey(task)
+    const cached = GM_getValue(key)
+    if (cached && Date.now() - cached.savedAt <= 7 * 24 * 60 * 60 * 1000) return Promise.resolve(cached.link)
+    let request = storyLinkRequests.get(key)
+    if (!request) {
+      const href = new URL(`task-view-${task.id}.json`, location.href)
+      request = fetchZenTao(href).then(({ task }) => {
+        const doc = new DOMParser().parseFromString(task.storySpec ?? '', 'text/html')
+        const link = parseRequirementLink(doc, href) ?? null
+        GM_setValue(key, { link, savedAt: Date.now() })
+        return link
+      }).finally(() => storyLinkRequests.delete(key))
+      storyLinkRequests.set(key, request)
+    }
+    return request
+  }
+
+  function updateTaskButton(row, link) {
+    const { button, deadline } = row
+    const prototype = prototypePageReference(new URL(link.url))
+    button.href = prototype && deadline ? linkWithDeadline(link.url, deadline, prototype.part) : link.url
+    button.target = link.target || '_blank'
+    button.textContent = prototype ? '查看' : '查看需求'
+    button.removeAttribute('title')
+    row.prototypeLabel = prototype && createPrototypeLabel(prototype.folder)
+  }
+
+  function syncPrototypeCohort(deadline) {
+    let request = cohortRequests.get(deadline)
+    if (!request) {
+      request = savePrototypeCohort(deadline).finally(() => cohortRequests.delete(deadline))
+      cohortRequests.set(deadline, request)
+    }
+    return request
+  }
+
+  async function savePrototypeCohort(deadline) {
+    const deadlines = await getProjectDeadlines()
+    if (!deadlines) return
+    const tasks = await readAssignedTasks()
+    const relevant = tasks.filter((task) => Number(task.story) > 0 && deadlines.get(String(task.project)) === deadline)
+    const pages = {}
+    await Promise.all(relevant.map(async (task) => {
+      const link = await loadStoryLink(task)
       const prototype = link && prototypePageReference(new URL(link.url))
-      for (const task of tasks) {
-        const end = deadlines?.get(String(task.project))
-        const button = buttons.get(String(task.id))
-        if (!button) continue
-        button.href = link?.url ?? new URL(`task-view-${task.id}.html`, location.href).href
-        if (prototype && end) button.href = linkWithDeadline(link.url, end, prototype.part)
-        button.target = link?.target || '_blank'
-        if (link) button.removeAttribute('title')
-        else button.title = '查看任务详情'
-        setPrototypeLabel(button, prototype?.folder)
-      }
-    }
-    const publish = () => {
-      const cohorts = new Map([...dates].map((date) => [date, {}]))
-      for (const { tasks, link } of jobs) {
-        const prototype = link && prototypePageReference(new URL(link.url))
-        for (const task of tasks) {
-          const end = deadlines?.get(String(task.project))
-          // 未收齐链接的日期保留上次完整快照，避免请求失败清空已有标记。
-          if (link === undefined) {
-            cohorts.delete(end)
-            continue
-          }
-          const pages = cohorts.get(end)
-          if (!prototype || !pages) continue
+      if (!prototype) return
+      const { key, path } = prototype
+      const state = UNFINISHED.includes(task.status) ? 2 : Number(task.status === 'done')
+      pages[key] = { path, state: Math.max(pages[key]?.state ?? 0, state) }
+    }))
+    // 整个截止日期的任务都读取成功后才覆盖之前的目录状态。
+    const key = PROTOTYPE_COHORT_KEY + deadline
+    GM_setValue(key, pages)
+    pruneStoredValues(new Set([key, ...relevant.map(storyLinkKey)]))
+  }
 
-          // 每次从需求的最新结果重算，移除旧链接后仍保留其他任务的标记。
-          const { key, path } = prototype
-          const state = UNFINISHED.includes(task.status) ? 2 : Number(task.status === 'done')
-          pages[key] = { path, state: Math.max(pages[key]?.state ?? 0, state) }
-        }
-      }
-      for (const [date, pages] of cohorts) GM_setValue(PROTOTYPE_COHORT_KEY + date, pages)
-    }
-
-    // 过期的缓存先用于显示，避免刷新期间或请求失败时清空原型页的标记。
-    const pending = jobs.filter((job) => {
-      const cached = GM_getValue(`storyLink:${job.version}`)
-      job.link = cached?.link
-      if (cached) applyLink(job.tasks, job.link)
-      return !cached || Date.now() - cached.savedAt > 7 * 24 * 60 * 60 * 1000
-    })
-    publish()
-    pruneStoredValues(new Set([...jobs.map(({ version }) => `storyLink:${version}`), ...[...dates].map((date) => PROTOTYPE_COHORT_KEY + date)]))
-
-    const concurrency = 6
-    let next = 0
-    let completed = 0
-    let failed = false
-    const syncPendingLinks = async () => {
-      while (next < pending.length) {
-        const job = pending[next++]
-        const { version, tasks } = job
-        try {
-          const href = new URL(`task-view-${tasks[0].id}.json`, location.href)
-          const { task } = await fetchZenTao(href)
-          const doc = new DOMParser().parseFromString(task.storySpec ?? '', 'text/html')
-          job.link = parseRequirementLink(doc, href) ?? null
-          GM_setValue(`storyLink:${version}`, { link: job.link, savedAt: Date.now() })
-          applyLink(tasks, job.link)
-        } catch {
-          failed = true
-        }
-        completed++
-        // 每完成一批就同步，已打开的原型页可以逐步更新。
-        if (completed % 24 === 0 || completed === pending.length) publish()
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, syncPendingLinks))
-    if (failed) throw new Error('部分任务详情读取失败')
+  function reportCohortError(error) {
+    console.error('加载同截止日期的禅道任务失败', error)
   }
 
   function pruneStoredValues(keepKeys) {
@@ -718,7 +687,8 @@
     }
   }
 
-  async function readTasks(path) {
+  async function readAssignedTasks() {
+    const path = 'my-work-task-assignedTo-0-id_desc'
     const first = await fetchZenTao(new URL(`${path}-0-2000-1.json`, location.href))
     const { recTotal, recPerPage, pageTotal } = first.pager
     const tasks = flattenTasks(first.tasks)
@@ -727,7 +697,7 @@
       tasks.push(...flattenTasks((await fetchZenTao(href)).tasks))
     }
     if (new Set(tasks.map((task) => task.id)).size !== Number(recTotal)) throw new Error('分页中的任务数与列表总数不符')
-    return { tasks, users: first.users }
+    return tasks
   }
 
   function flattenTasks(tasks) {
