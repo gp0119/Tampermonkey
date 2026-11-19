@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      2.1.5
+// @version      2.1.6
 // @description  在禅道任务列表查看需求链接、项目截止日期和协作人员，批量完成任务，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -16,7 +16,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=2.1.5
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=2.1.6
 
 ;(function () {
   'use strict'
@@ -242,16 +242,17 @@
     addTaskStyles(doc)
     table.render({ cols: columns, bordered: true, onRenderCell: renderCell, footToolbar: addBatchFinishButton(table, pageWindow) })
     const deadlines = getProjectDeadlines()
-    deadlines.then((projects) => {
-      if (!projects) return
+    const activeDates = deadlines.then((projects) => {
       const dates = new Set()
+      if (!projects) return dates
       for (const row of rows.values()) {
         row.deadline = projects.get(row.project)
         if (row.deadline) dates.add(row.deadline)
       }
       refresh()
-      for (const date of dates) syncPrototypeCohort(date).catch(reportCohortError)
+      return dates
     })
+    const linkReads = []
     for (const row of rows.values()) {
       if (!Number(row.task.story)) continue
       const apply = (link) => {
@@ -269,13 +270,18 @@
         const cached = GM_getValue(storyLinkKey(row.task))
         if (cached) apply(cached.link)
       })
-      Promise.all([loadStoryLink(row.task), deadlines]).then(([link]) => apply(link)).catch((error) => {
+      linkReads.push(Promise.all([loadStoryLink(row.task), deadlines]).then(([link]) => apply(link)).catch((error) => {
         if (row.button.title === '查看任务详情') row.button.title = '需求链接读取失败，点击查看任务详情'
         refresh()
         console.error('读取需求链接失败', error)
-      })
+      }))
     }
-    addTaskAssignees([...rows.values()], labels, deadlines, refresh)
+    const assigneeRead = addTaskAssignees([...rows.values()], labels, deadlines, refresh, account)
+    // Axure 需要读取整个任务列表，先完成当前页面的需求链接和协作人员读取。
+    Promise.all([activeDates, Promise.all(linkReads), assigneeRead]).then(([dates]) => {
+      if (!holder.isConnected || table.options.data !== data || table.options.onRenderCell !== renderCell) return
+      for (const date of dates) syncPrototypeCohort(date).catch(reportCohortError)
+    }).catch(reportCohortError)
     return { table, data, currentRole, nativeRenderCell, renderCell }
   }
 
@@ -453,7 +459,7 @@
     doc.head.append(style)
   }
 
-  async function addTaskAssignees(rows, labels, projectDeadlines, refresh) {
+  async function addTaskAssignees(rows, labels, projectDeadlines, refresh, account) {
     const deadlines = await projectDeadlines
     if (!deadlines) {
       for (const { cells } of rows) {
@@ -467,31 +473,34 @@
       const deadline = deadlines.get(project)
       return Number(task.story) > 0 && deadline && new Date(`${deadline}T00:00:00`).getTime() >= today
     })
-    // 缓存只用于先显示结果，每次刷新仍重新读取关联任务状态。
-    for (const row of upcomingRows) {
-      row.cacheKey = `storyAssignees:22.7/${row.project}/${row.task.story}/${labels.join('/')}`
-      const cached = GM_getValue(row.cacheKey)
-      if (cached?.people && Date.now() - cached.savedAt < 24 * 60 * 60 * 1000 && (!cached.completedOnly || row.task.status === 'done')) {
-        row.hasCachedAssignees = true
-        renderTaskAssignees(row.cells, cached.people)
-      } else {
-        for (const cell of row.cells) cell.textContent = '…'
-      }
-    }
-
-    refresh()
     const groups = Object.groupBy(upcomingRows, ({ project, task }) => `${project}/${task.story}`)
     await Promise.all(Object.values(groups).map(async (rows) => {
       const { project, task: { story } } = rows[0]
+      const cacheKeys = labels.map((label) => `storyAssignees:22.7/${account}/${project}/${story}/${label}`)
+      const now = Date.now()
+      const cached = cacheKeys.map((key) => {
+        const role = GM_getValue(key)
+        return role && now - role.savedAt < 24 * 60 * 60 * 1000 ? role : null
+      })
+      for (const { cells } of rows) {
+        cells.forEach((cell, index) => {
+          const role = cached[index]
+          if (!role) {
+            cell.textContent = '…'
+            return
+          }
+          renderTaskAssignees(cell, role.people)
+          cell.title = '正在刷新，暂显示上次读取结果'
+        })
+      }
+      refresh()
+
       let related
       try {
         related = await readRelatedTasks(project, story, rows, labels)
       } catch (error) {
-        for (const { cells, hasCachedAssignees } of rows) {
-          for (const cell of cells) {
-            if (!hasCachedAssignees) cell.textContent = '读取失败'
-            cell.title = error.message
-          }
+        for (const { cells } of rows) {
+          cells.forEach((cell, index) => showAssigneeReadError(cell, cached[index], error))
         }
         console.error(`读取需求 #${story} 的关联任务失败`, error)
         refresh()
@@ -518,57 +527,51 @@
         status: tasks.reduce((a, b) => (rank(b.status) > rank(a.status) ? b : a)).status,
         ids: tasks.map(({ id }) => id),
       })))
-      for (const { cells, hasCachedAssignees } of rows) {
-        renderTaskAssignees(cells, people, hasCachedAssignees)
-        results.forEach((result, index) => {
-          if (result.status === 'rejected') cells[index].title = result.reason.cause?.message ?? result.reason.message
+      for (const { cells } of rows) {
+        cells.forEach((cell, index) => {
+          const result = results[index]
+          if (result.status === 'rejected') {
+            showAssigneeReadError(cell, cached[index], result.reason.cause ?? result.reason)
+          } else {
+            renderTaskAssignees(cell, people[index])
+          }
         })
       }
-      // 只缓存完整的读取结果。
-      if (!assignees.includes(null)) {
-        const complete = assignees.every((group) => group.length && group.every(({ name }) => name))
-        const testers = assignees[labels.indexOf('测试')]
-        const settled = assignees.flat().every(({ status }) => !UNFINISHED.includes(status))
-        for (const { task, cacheKey } of rows) {
-          const completedWithTest = task.status === 'done' && testers?.length && testers.every(({ name }) => name)
-          if (settled && (complete || completedWithTest)) {
-            GM_setValue(cacheKey, { people, savedAt: Date.now(), completedOnly: !complete })
-          } else {
-            GM_deleteValue(cacheKey)
-          }
-        }
-      }
+      // 只更新成功的角色，保留其他角色原来的结果和时间戳。
+      people.forEach((group, index) => {
+        if (group !== null) GM_setValue(cacheKeys[index], { people: group, savedAt: Date.now() })
+      })
       refresh()
     }))
   }
 
-  function renderTaskAssignees(cells, people, keepCached) {
+  function showAssigneeReadError(cell, cached, error) {
+    if (!cached) cell.textContent = '读取失败'
+    cell.title = cached ? `显示上次读取结果。\n${error.message}` : error.message
+  }
+
+  function renderTaskAssignees(cell, people) {
     const statusLabels = { wait: '未开始', doing: '进行中', pause: '已暂停', done: '已完成', closed: '已关闭', cancel: '已取消' }
-    cells.forEach((cell, index) => {
-      if (people[index] === null) {
-        if (!keepCached) cell.textContent = '读取失败'
+    cell.title = ''
+    cell.replaceChildren()
+    if (!people.length) cell.append('—')
+    people.forEach(({ name, status, ids }, order) => {
+      if (order) cell.append('、')
+      if (!name) {
+        cell.append('未指派')
         return
       }
-      cell.replaceChildren()
-      if (!people[index].length) cell.append('—')
-      people[index].forEach(({ name, status, ids }, order) => {
-        if (order) cell.append('、')
-        if (!name) {
-          cell.append('未指派')
-          return
-        }
-        const person = document.createElement('span')
-        person.className = 'zentao-assignee'
-        person.textContent = name
-        const dot = document.createElement('span')
-        dot.className = 'zentao-assignee-status'
-        dot.dataset.status = status
-        dot.title = `任务 ${ids.map((id) => `#${id}`).join('、')}：${statusLabels[status] || status}`
-        dot.setAttribute('role', 'img')
-        dot.setAttribute('aria-label', `${name}，${dot.title}`)
-        person.prepend(dot)
-        cell.append(person)
-      })
+      const person = document.createElement('span')
+      person.className = 'zentao-assignee'
+      person.textContent = name
+      const dot = document.createElement('span')
+      dot.className = 'zentao-assignee-status'
+      dot.dataset.status = status
+      dot.title = `任务 ${ids.map((id) => `#${id}`).join('、')}：${statusLabels[status] || status}`
+      dot.setAttribute('role', 'img')
+      dot.setAttribute('aria-label', `${name}，${dot.title}`)
+      person.prepend(dot)
+      cell.append(person)
     })
   }
 
