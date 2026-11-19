@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      2.1.4
+// @version      2.1.5
 // @description  在禅道任务列表查看需求链接、项目截止日期和协作人员，批量完成任务，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -16,7 +16,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=2.1.4
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=2.1.5
 
 ;(function () {
   'use strict'
@@ -225,7 +225,10 @@
       if (info.col.name === 'project' && row.prototypeLabel) return [...content, { html: row.prototypeLabel, className: 'zentao-prototype-label' }]
       if (info.col.name === dateColumn.name) return [row.deadline ?? '—']
       const roleIndex = roleColumns.findIndex(({ name }) => name === info.col.name)
-      if (roleIndex >= 0) return [{ html: row.cells[roleIndex].innerHTML }]
+      if (roleIndex >= 0) {
+        const cell = row.cells[roleIndex]
+        return [{ html: cell.innerHTML, attrs: { title: cell.title || undefined } }]
+      }
       return content
     }
     let frame
@@ -485,8 +488,10 @@
         related = await readRelatedTasks(project, story, rows, labels)
       } catch (error) {
         for (const { cells, hasCachedAssignees } of rows) {
-          if (hasCachedAssignees) continue
-          for (const cell of cells) cell.textContent = '读取失败'
+          for (const cell of cells) {
+            if (!hasCachedAssignees) cell.textContent = '读取失败'
+            cell.title = error.message
+          }
         }
         console.error(`读取需求 #${story} 的关联任务失败`, error)
         refresh()
@@ -513,7 +518,12 @@
         status: tasks.reduce((a, b) => (rank(b.status) > rank(a.status) ? b : a)).status,
         ids: tasks.map(({ id }) => id),
       })))
-      for (const { cells, hasCachedAssignees } of rows) renderTaskAssignees(cells, people, hasCachedAssignees)
+      for (const { cells, hasCachedAssignees } of rows) {
+        renderTaskAssignees(cells, people, hasCachedAssignees)
+        results.forEach((result, index) => {
+          if (result.status === 'rejected') cells[index].title = result.reason.cause?.message ?? result.reason.message
+        })
+      }
       // 只缓存完整的读取结果。
       if (!assignees.includes(null)) {
         const complete = assignees.every((group) => group.length && group.every(({ name }) => name))
@@ -719,7 +729,14 @@
     if (activeZenTaoRequests < 6) activeZenTaoRequests++
     else await new Promise((resolve) => zenTaoRequestQueue.push(resolve))
     try {
-      const response = await fetch(href, { redirect: 'error', signal: AbortSignal.timeout(15000) })
+      const read = () => fetch(href, { redirect: 'manual', cache: 'no-store', signal: AbortSignal.timeout(15000) })
+      let response = await read()
+      // 同一批请求可能偶尔收到登录重定向。只重读一次，避免跟随跳转或重复写入。
+      if (response.type === 'opaqueredirect') {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        response = await read()
+        if (response.type === 'opaqueredirect') throw new Error('禅道接口被重定向，请检查登录状态或访问权限')
+      }
       if (!response.ok) throw new Error(`禅道返回 HTTP ${response.status}`)
       return await response.text()
     } finally {
