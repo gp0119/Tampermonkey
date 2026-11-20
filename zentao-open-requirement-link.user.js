@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      2.1.6
-// @description  在禅道任务列表查看需求链接、项目截止日期和协作人员，批量完成任务，并在原型目录标记任务状态
+// @version      2.1.7
+// @description  在禅道任务列表查看需求链接和项目截止日期，批量完成任务，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @match        *://zentao.chaomeifan.com/*
@@ -16,7 +16,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=2.1.6
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=2.1.7
 
 ;(function () {
   'use strict'
@@ -26,6 +26,8 @@
   const DEADLINE_PARAM = 'zentaoDeadline'
   const ASSIGNED_TASKS_PAGE = /\/my-work-task(?:-assignedTo(?:-.*)?)?\.html$/
   const DETAIL_TITLE = '.detail-section > .detail-section-title'
+  // 暂时隐藏协作人员列，并跳过相关请求。
+  const SHOW_TASK_ASSIGNEES = false
   const ROLES = ['前端', '后端', '测试']
   const UNFINISHED = ['wait', 'doing', 'pause']
   const pendingZenTaoRequests = new Map()
@@ -183,7 +185,7 @@
     const currentRole = ROLES.find((role) => mine.some(({ name }) => name.includes(`【${role}】`)))
       ?? previous?.currentRole
       ?? (mine.length && mine.every(({ type }) => type === 'test') ? '测试' : undefined)
-    const labels = ROLES.filter((label) => label !== currentRole)
+    const labels = SHOW_TASK_ASSIGNEES ? ROLES.filter((label) => label !== currentRole) : []
     const rows = new Map(tasks.map((task) => {
       const id = String(task.id)
       const project = String(task.project)
@@ -276,8 +278,8 @@
         console.error('读取需求链接失败', error)
       }))
     }
-    const assigneeRead = addTaskAssignees([...rows.values()], labels, deadlines, refresh, account)
-    // Axure 需要读取整个任务列表，先完成当前页面的需求链接和协作人员读取。
+    const assigneeRead = labels.length ? addTaskAssignees([...rows.values()], labels, deadlines, refresh, account) : undefined
+    // Axure 的全量读取排在当前页面的请求之后。
     Promise.all([activeDates, Promise.all(linkReads), assigneeRead]).then(([dates]) => {
       if (!holder.isConnected || table.options.data !== data || table.options.onRenderCell !== renderCell) return
       for (const date of dates) syncPrototypeCohort(date).catch(reportCohortError)
