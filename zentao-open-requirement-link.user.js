@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         禅道打开需求链接
 // @namespace    http://tampermonkey.net/
-// @version      2.1.7
+// @version      2.1.8
 // @description  在禅道任务列表查看需求链接和项目截止日期，批量完成任务，并在原型目录标记任务状态
 // @updateURL    https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js
@@ -16,7 +16,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        unsafeWindow
 // ==/UserScript==
-// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=2.1.7
+// https://raw.githubusercontent.com/gp0119/Tampermonkey/master/zentao-open-requirement-link.user.js?v=2.1.8
 
 ;(function () {
   'use strict'
@@ -305,7 +305,8 @@
   async function finishSelectedTasks(table, pageWindow, button) {
     if (batchFinishing) return
     const notify = (type, content) => pageWindow.zui.Messager.show({ type, content })
-    const selected = table.$.getChecks().map((id) => table.$.getRowInfo(id)?.data).filter(Boolean)
+    const checkedIDs = table.$.getChecks()
+    const selected = checkedIDs.map((id) => table.$.getRowInfo(id)?.data).filter(Boolean)
     if (!selected.length) {
       notify('warning', '请先勾选任务')
       return
@@ -338,6 +339,7 @@
     } finally {
       batchFinishing = false
       if (table.element.isConnected) {
+        if (pageWindow.location.href === listUrl) table.$.toggleCheckRows(checkedIDs, false)
         // 处理期间分页或排序可能重新生成工具栏。
         const currentButton = table.options.footToolbar.items.find(({ key }) => key === button.key)
         if (currentButton) {
